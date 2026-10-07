@@ -112,7 +112,7 @@ pub fn paint(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, area: Re
         if eresp.clicked() {
             actions.push(("captions.setTrack".into(), json!({"track": tr.id.0, "enabled": !tr.enabled})));
         }
-        let name = format!("{} · {}", tr.name, tr.format.label());
+        let name = format!("{} · {}", tr.name, crate::i18n::t(tr.format.label()));
         painter.with_clip_rect(Rect::from_min_max(pos2(hrect.min.x + 86.0, row.min.y), pos2(hrect.max.x - 4.0, row.max.y))).text(
             pos2(hrect.min.x + 90.0, row.center().y),
             Align2::LEFT_CENTER,

@@ -6,6 +6,29 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
+/// A literal UI string in the language the interface is drawn in (`i18n::t`). Only literals: the
+/// i18n tests read every `tl!` literal in the crate and require a Spanish translation for it.
+macro_rules! tl {
+    ($s:literal) => {
+        $crate::i18n::t($s)
+    };
+}
+
+/// A translated template with `{name}` placeholders filled in, for text that `format!` would build.
+/// After the template literal come the values: `n = count`, or just `gain` for a variable of the
+/// same name. Values are formatted with `Display`; the translation may reorder placeholders.
+macro_rules! tlf {
+    (@v $k:ident = $v:expr) => {
+        $v
+    };
+    (@v $k:ident) => {
+        $k
+    };
+    ($s:literal $(, $k:ident $(= $v:expr)?)* $(,)?) => {
+        $crate::i18n::fmt($crate::i18n::t($s), &[$((stringify!($k), ToString::to_string(&tlf!(@v $k $(= $v)?)).as_str())),*])
+    };
+}
+
 pub mod automation;
 pub mod brand;
 pub mod control;
@@ -297,7 +320,7 @@ impl FilmcraftApp {
         {
             g.render_state.renderer.write().free_texture(&id);
         }
-        self.ui.status = "Graphics problem: switched to software compositing".into();
+        self.ui.status = tl!("Graphics problem: switched to software compositing").into();
     }
 
     /// Composite a plan on the GPU and return the egui texture showing it.
@@ -349,9 +372,10 @@ impl FilmcraftApp {
         let frames = Arc::new(FrameServer::new(session.media.clone(), session.services.clone(), session.previews.clone(), FrameServer::default_workers()));
         let workspaces =
             session.prefs_path.as_ref().and_then(|p| p.parent()).map(|d| dock::WorkspacePrefs::load(&d.join(dock::WORKSPACES_FILE))).unwrap_or_default();
+        let language = i18n::Language::parse(&session.prefs.general.interface_language).unwrap_or_default();
         Self {
             session,
-            ui: UiState::default(),
+            ui: UiState { language, ..UiState::default() },
             tokens: Tokens::for_kind(ThemeKind::Dark),
             frames,
             playback: Playback { speed: 1.0, ..Default::default() },
@@ -450,6 +474,20 @@ impl FilmcraftApp {
         let prev = self.applied_prefs.take();
         if prev.as_ref().is_none_or(|q| q.appearance != p.appearance || q.general.show_tool_tips != p.general.show_tool_tips) {
             self.set_theme(ctx, ThemeKind::from_pref(&p.appearance.color_theme));
+        }
+        if prev.as_ref().is_none_or(|q| q.general.interface_language != p.general.interface_language) {
+            let language = i18n::Language::parse(&p.general.interface_language).unwrap_or_default();
+            if language == i18n::Language::Ja && !i18n::install_japanese_font(ctx) {
+                self.ui.language = i18n::Language::En;
+                self.ui.status = tl!("no Japanese font is installed on this system; the interface stays in English").into();
+            } else {
+                self.ui.language = language;
+            }
+            i18n::set_current(self.ui.language);
+            let items = menus::menu_items(self);
+            if let Some(hook) = self.hooks.shortcuts_changed.as_mut() {
+                hook(&items);
+            }
         }
         self.frames.set_cache_budget(p.memory.frame_cache_mb as usize * (1 << 20));
         self.ui.play_after_render = p.timeline.play_after_rendering;
@@ -1127,6 +1165,7 @@ impl FilmcraftApp {
     // ---------------------------------------------------------------- frame
 
     fn frame(&mut self, ui: &mut egui::Ui) {
+        i18n::set_current(self.ui.language);
         if std::mem::take(&mut self.panic_next_frame) {
             crash::injected_fault("injected UI fault");
         }
@@ -1234,7 +1273,7 @@ impl FilmcraftApp {
         let p = ui.painter();
         p.rect_filled(bar, 3.0, t.separator);
         p.rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * f, bar.height())), 3.0, t.accent);
-        let verb = if job.label.starts_with("Rendering") { job.label.clone() } else { "Exporting".to_string() };
+        let verb = if job.label.starts_with("Rendering") { crate::i18n::t(&job.label).to_string() } else { tl!("Exporting").to_string() };
         p.text(egui::pos2(bar.min.x - 8.0, sb.center().y), egui::Align2::RIGHT_CENTER, format!("{verb}… {:.0}%", f * 100.0), Tokens::ui(11.0), t.text_dim);
         let resp = ui.interact(cancel, egui::Id::new(("job-cancel", job.id)), egui::Sense::click());
         let c = if resp.hovered() { t.hot_text } else { t.text_dim };
@@ -1243,7 +1282,7 @@ impl FilmcraftApp {
         p.line_segment([cancel.center() + egui::vec2(-k, k), cancel.center() + egui::vec2(k, -k)], egui::Stroke::new(1.4, c));
         self.auto.add("status.job.cancel", cancel, &format!("Cancel {}", job.label));
         self.auto.add("status.job.progress", bar, &format!("{:.0}%", f * 100.0));
-        if resp.on_hover_text("Cancel").clicked() {
+        if resp.on_hover_text(tl!("Cancel")).clicked() {
             job.progress.cancel.store(true, Ordering::Relaxed);
             self.watched_render = None;
         }
@@ -1252,18 +1291,18 @@ impl FilmcraftApp {
     /// Contextual hint for the status bar (Premiere shows tool/gesture hints here).
     fn hint_text(&self) -> String {
         match self.ui.tool {
-            state::Tool::Selection => "Click to select, or click in empty space and drag to marquee select. Use Shift, Opt, and Cmd for other options.",
-            state::Tool::TrackSelectForward => "Click to select all clips to the right in all tracks. Shift-click for a single track.",
-            state::Tool::TrackSelectBackward => "Click to select all clips to the left in all tracks. Shift-click for a single track.",
-            state::Tool::Ripple => "Drag an edit point to ripple trim; later clips move to keep the gap closed.",
-            state::Tool::Rolling => "Drag an edit point to roll it: the out of one clip and the in of the next move together.",
-            state::Tool::RateStretch => "Drag an edge to change the clip's speed so it fills the new duration.",
-            state::Tool::Remix => "Drag the edge of a music clip to remix it to the new duration at musically matching beats.",
-            state::Tool::Razor => "Click to split a clip. Shift-click to split all tracks.",
-            state::Tool::Slip => "Drag a clip to slip its source in/out without moving it.",
-            state::Tool::Slide => "Drag a clip to slide it between its neighbours.",
-            state::Tool::Hand => "Drag to scroll the timeline.",
-            state::Tool::Zoom => "Click to zoom in; Opt-click to zoom out.",
+            state::Tool::Selection => tl!("Click to select, or click in empty space and drag to marquee select. Use Shift, Opt, and Cmd for other options."),
+            state::Tool::TrackSelectForward => tl!("Click to select all clips to the right in all tracks. Shift-click for a single track."),
+            state::Tool::TrackSelectBackward => tl!("Click to select all clips to the left in all tracks. Shift-click for a single track."),
+            state::Tool::Ripple => tl!("Drag an edit point to ripple trim; later clips move to keep the gap closed."),
+            state::Tool::Rolling => tl!("Drag an edit point to roll it: the out of one clip and the in of the next move together."),
+            state::Tool::RateStretch => tl!("Drag an edge to change the clip's speed so it fills the new duration."),
+            state::Tool::Remix => tl!("Drag the edge of a music clip to remix it to the new duration at musically matching beats."),
+            state::Tool::Razor => tl!("Click to split a clip. Shift-click to split all tracks."),
+            state::Tool::Slip => tl!("Drag a clip to slip its source in/out without moving it."),
+            state::Tool::Slide => tl!("Drag a clip to slide it between its neighbours."),
+            state::Tool::Hand => tl!("Drag to scroll the timeline."),
+            state::Tool::Zoom => tl!("Click to zoom in; Opt-click to zoom out."),
             _ => "",
         }
         .to_string()
@@ -1349,26 +1388,31 @@ impl FilmcraftApp {
     fn error_window(&mut self, ctx: &egui::Context) {
         let Some(msg) = self.ui_error.clone() else { return };
         let mut close = false;
-        egui::Window::new("FilmCraft hit an error").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-            ui.set_max_width(460.0);
-            ui.label("Something went wrong while drawing the window. Your project is still open; save it to be safe.");
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new(&msg).monospace().small());
-            if let Some(p) = crash::log_path() {
-                ui.label(egui::RichText::new(format!("Details: {}", p.display())).small());
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let s = ui.button("Save Project");
-                self.auto.add("error.save", s.rect, "Save Project");
-                if s.clicked() {
-                    let _ = crate::menus::invoke(self, ctx, "file.save", serde_json::json!({}));
+        egui::Window::new(tl!("FilmCraft hit an error"))
+            .id(egui::Id::new("FilmCraft hit an error"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(460.0);
+                ui.label(tl!("Something went wrong while drawing the window. Your project is still open; save it to be safe."));
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(&msg).monospace().small());
+                if let Some(p) = crash::log_path() {
+                    ui.label(egui::RichText::new(tlf!("Details: {path}", path = p.display())).small());
                 }
-                let d = ui.button("Continue");
-                self.auto.add("error.dismiss", d.rect, "Continue");
-                close |= d.clicked();
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let s = ui.button(tl!("Save Project"));
+                    self.auto.add("error.save", s.rect, "Save Project");
+                    if s.clicked() {
+                        let _ = crate::menus::invoke(self, ctx, "file.save", serde_json::json!({}));
+                    }
+                    let d = ui.button(tl!("Continue"));
+                    self.auto.add("error.dismiss", d.rect, "Continue");
+                    close |= d.clicked();
+                });
             });
-        });
         if close {
             self.ui_error = None;
         }

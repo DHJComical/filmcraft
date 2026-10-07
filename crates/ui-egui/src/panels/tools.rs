@@ -16,7 +16,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let r = Rect::from_min_size(pos2(rect.center().x - size / 2.0, y), vec2(size, size));
         let resp = ui.interact(r, egui::Id::new(("tool", format!("{:?}", group[0]))), Sense::click()).on_hover_text(format!(
             "{} ({})",
-            current.label(),
+            crate::i18n::t(current.label()),
             current.shortcut()
         ));
         for tl in &group {
@@ -39,7 +39,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if group.len() > 1 {
             egui::Popup::context_menu(&resp).show(|ui| {
                 for tl in &group {
-                    if ui.selectable_label(app.ui.tool == *tl, format!("{}   {}", tl.label(), tl.shortcut())).clicked() {
+                    if ui.selectable_label(app.ui.tool == *tl, format!("{}   {}", crate::i18n::t(tl.label()), tl.shortcut())).clicked() {
                         app.ui.tool = *tl;
                     }
                 }
