@@ -177,11 +177,12 @@ fn open(p: &Path) -> MpegSource {
     MpegSource::open(p.file_name().unwrap().to_str().unwrap(), bytes(p)).unwrap()
 }
 
-/// ffprobe's video frames in display order: pts (90 kHz).
+/// ffprobe's video frames in display order: presentation timestamps (90 kHz), including
+/// inferred timestamps where an MPEG program stream omits a picture's PTS.
 fn ffprobe_frame_pts(file: &Path) -> Option<Vec<i64>> {
     let fp = filmcraft_testkit::ffprobe()?;
     let o = std::process::Command::new(fp)
-        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "frame=pts", "-of", "csv=p=0"])
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "frame=best_effort_timestamp", "-of", "csv=p=0"])
         .arg(file)
         .output()
         .ok()?;
