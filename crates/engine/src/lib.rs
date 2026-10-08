@@ -45,6 +45,7 @@ pub mod sequence_tools;
 pub mod settings;
 pub mod shortcut_presets;
 pub mod shortcuts;
+pub mod source_monitor;
 pub mod sync;
 pub mod transcript;
 pub mod trim;
@@ -1105,3 +1106,6 @@ mod trim_tests;
 mod vfx_tests;
 #[cfg(test)]
 mod voiceover_tests;
+
+#[cfg(test)]
+mod source_placement_tests;

@@ -26,6 +26,9 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("app.language.japanese", "日本語", ["Edit", "Language"], None),
     uic!("app.language.spanish", "Español", ["Edit", "Language"], None),
     uic!("app.language.portuguese", "Português (Brasil)", ["Edit", "Language"], None),
+    uic!("source.playback.toggle", "Source Play/Stop", [], None),
+    uic!("source.playback.play", "Play Source", [], None),
+    uic!("source.playback.stop", "Stop Source", [], None),
     uic!("playback.toggle", "Play/Stop", [], Some("Space")),
     uic!("playback.forward", "Shuttle Right", [], Some("L")),
     uic!("playback.stop", "Shuttle Stop", [], Some("K")),
@@ -150,8 +153,21 @@ pub fn panel_command_id(p: PanelKind) -> String {
     format!("window.panel.{}", p.id())
 }
 
+/// Explicit monitor parameters override keyboard focus.
+pub fn targets_source(app: &FilmcraftApp, params: &Value) -> bool {
+    match params.get("monitor").and_then(Value::as_str) {
+        Some("source") => true,
+        Some(_) => false,
+        None => app.ui.focused == PanelKind::Source,
+    }
+}
+
 /// Execute a UI or engine command by id.
-pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params: Value) -> Result<Value, String> {
+    if filmcraft_engine::source_monitor::source_command(id) && targets_source(app, &params) && params.get("target").is_none() {
+        let object = params.as_object_mut().ok_or("command parameters must be an object")?;
+        object.insert("target".into(), json!("source"));
+    }
     if matches!(id, "app.language.english" | "app.language.japanese" | "app.language.spanish" | "app.language.portuguese") {
         // Japanese needs the craft-fonts (built with CRAFT_FONTS_DIR) or a font installed on the system
         if id == "app.language.japanese" && !crate::i18n::install_japanese_font(ctx) {
@@ -190,7 +206,9 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
     if let Some(r) = crate::panels::keyboard::route(app, ctx, id, &params) {
         return r;
     }
-    if let Some(r) = crate::panels::trim_monitor::route_transport(app, ctx, id) {
+    if !targets_source(app, &params)
+        && let Some(r) = crate::panels::trim_monitor::route_transport(app, ctx, id)
+    {
         return r;
     }
     if let Some(r) = crate::panels::multicam::route(app, id, &params) {
@@ -233,13 +251,51 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
         return r;
     }
     match id {
+        "playback.slowForward" | "playback.slowReverse" if targets_source(app, &params) => {
+            return Err("Source playback currently supports normal forward speed".into());
+        }
         "playback.slowForward" | "playback.slowReverse" => {
             app.play(if id == "playback.slowForward" { 0.25 } else { -0.25 });
             return Ok(json!({"speed": app.playback.speed}));
         }
+        "source.playback.toggle" => {
+            app.toggle_source_play()?;
+            return Ok(json!({"playing": app.source_playback.clock.playing}));
+        }
+        "source.playback.play" => {
+            app.play_source()?;
+            return Ok(json!({"playing": app.source_playback.clock.playing}));
+        }
+        "source.playback.stop" => {
+            app.stop_source();
+            return Ok(Value::Null);
+        }
+        "playback.toggle"
+            if params.get("monitor").and_then(Value::as_str) == Some("source") || (params.get("monitor").is_none() && app.ui.focused == PanelKind::Source) =>
+        {
+            app.toggle_source_play()?;
+            return Ok(json!({"playing": app.source_playback.clock.playing}));
+        }
         "playback.toggle" => {
             app.toggle_play(1.0);
             return Ok(json!({"playing": app.playback.playing}));
+        }
+        "playback.forward" if targets_source(app, &params) => {
+            app.play_source()?;
+            return Ok(json!({"playing": app.source_playback.clock.playing, "speed": 1.0}));
+        }
+        "playback.reverse" if targets_source(app, &params) => {
+            return Err("Source playback currently supports normal forward speed; use Play/Space or frame stepping".into());
+        }
+        "playhead.stepBack" | "playhead.stepForward" | "playhead.stepBack5" | "playhead.stepForward5" if targets_source(app, &params) => {
+            app.stop_source();
+            let item = app.session.state.source_item.ok_or("Open a Source clip first")?;
+            let view = filmcraft_engine::clip_ops::source_view(&app.session, item).ok_or("Source clip is unavailable")?;
+            let count = if id.ends_with('5') { i64::from(app.session.prefs.playback.step_many_frames) } else { 1 };
+            let direction = if id.contains("Back") { -1 } else { 1 };
+            let delta = view.rate.frame_duration().0.saturating_mul(count).saturating_mul(direction);
+            let time = filmcraft_time::Tick(app.session.state.source_playhead.0.saturating_add(delta));
+            return app.session.execute("source.setPlayhead", json!({"time": time.0})).map_err(|e| e.to_string());
         }
         "playback.forward" => {
             let s = if app.playback.playing && app.playback.speed > 0.0 { (app.playback.speed * 2.0).min(8.0) } else { 1.0 };
@@ -252,8 +308,20 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
             return Ok(json!({"speed": app.playback.speed}));
         }
         "playback.stop" => {
-            app.stop();
+            if targets_source(app, &params) {
+                app.stop_source();
+            } else {
+                app.stop();
+            }
             return Ok(Value::Null);
+        }
+        "playback.inToOut" if targets_source(app, &params) => {
+            app.play_source_range(false, false)?;
+            return Ok(Value::Null);
+        }
+        "playback.loop" if targets_source(app, &params) => {
+            app.source_playback.clock.looping = !app.source_playback.clock.looping;
+            return Ok(json!({"loop": app.source_playback.clock.looping}));
         }
         "playback.inToOut" => {
             let seq = app.session.active_sequence();

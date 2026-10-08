@@ -597,7 +597,13 @@ pub fn waveform(
     p.line_segment([pos2(x, area.min.y), pos2(x, area.max.y)], Stroke::new(1.0, t.playhead));
     let resp = ui.interact(area, egui::Id::new("source-waveform"), Sense::click_and_drag());
     app.auto.add("source.waveform", area, "audio waveform");
+    // Horizontal waveform drags scrub; dragging vertically lifts the marked audio to the timeline.
+    let delta = resp.drag_delta();
+    if resp.dragged() && delta.y.abs() > delta.x.abs().max(6.0) && crate::panels::dragged_source(ui).is_none() {
+        crate::panels::source_drag::begin(app, ui, false, true);
+    }
     if (resp.clicked() || resp.dragged())
+        && crate::panels::dragged_source(ui).is_none()
         && let Some(pos) = resp.interact_pointer_pos()
     {
         let f = ((pos.x - area.min.x) / area.width()).clamp(0.0, 1.0) as f64;
