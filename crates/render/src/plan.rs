@@ -275,8 +275,7 @@ fn push_item(
     }
     // Graphic clips without standard effects: the layers are rasterised (cached) into one tight
     // image the GPU places as a layer.
-    if !(opts.effects && item.has_standard_effects())
-        && !item.has_opacity_masks()
+    if !(opts.effects && item.has_standard_effects() || item.has_opacity_masks())
         && project.item(item.item).is_some_and(|p| matches!(p.kind, ItemKind::Graphic { .. }))
     {
         let Some(size) = crate::source_size(project, item.item) else { return };
