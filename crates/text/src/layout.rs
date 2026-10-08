@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use harfrust::{Direction, Feature, Tag, UnicodeBuffer};
 use unicode_bidi::{BidiInfo, Level};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::fonts::{self, FaceId, Resolved};
 
@@ -218,7 +219,7 @@ pub struct Layout {
     /// Lines were left out because they do not fit the box height.
     pub overflow: bool,
     pub text_len: usize,
-    /// Laid out vertically (one line per character; columns right to left).
+    /// Laid out vertically (one line per grapheme; columns right to left).
     pub vertical: bool,
 }
 
@@ -707,7 +708,7 @@ pub fn layout_rich_uncached(text: &str, style: &TextStyle, runs: &[StyleRun], pa
     lay
 }
 
-/// Vertical layout: each character is its own line (so carets, hit testing and selection work
+/// Vertical layout: each grapheme is its own line (so carets, hit testing and selection work
 /// unchanged), stacked top to bottom and centred on its column; columns run right to left.
 fn layout_vertical(text: &str, sty: &Styles, para: &ParagraphStyle, col_w: f32, mut lay: Layout) -> Layout {
     let style = sty.list[0];
@@ -724,8 +725,8 @@ fn layout_vertical(text: &str, sty: &Styles, para: &ParagraphStyle, col_w: f32, 
         if p_clean.is_empty() {
             cells.extend(paragraph("", base, sty, &flat));
         }
-        for (off, ch) in p_clean.char_indices() {
-            cells.extend(paragraph(&p_clean[off..off + ch.len_utf8()], base + off, sty, &flat));
+        for (off, cluster) in p_clean.grapheme_indices(true) {
+            cells.extend(paragraph(cluster, base + off, sty, &flat));
         }
         let h = row * cells.len() as f32;
         let y0 = match para.align {
@@ -931,6 +932,51 @@ mod tests {
         // differs from horizontal layout in the cache
         let h = layout("abc\nde", &st(40.0), &ParagraphStyle::default());
         assert_eq!(h.lines.len(), 2);
+    }
+
+    #[test]
+    fn vertical_cells_keep_combining_marks_with_their_base() {
+        let style = st(32.0);
+        let para = ParagraphStyle { vertical: true, ..Default::default() };
+        let decomposed = layout_uncached("e\u{301}x", &style, &para);
+        let composed = layout_uncached("éx", &style, &para);
+        assert_eq!(decomposed.lines.len(), 2, "the combining acute must not get another vertical cell");
+        assert_eq!(decomposed.lines[0].range, 0..3);
+        assert_eq!(decomposed.lines[1].range, 3..4);
+        assert_eq!(decomposed.text_len, 4, "retain the original UTF-8 source offsets");
+        assert_eq!(
+            decomposed.glyphs.iter().map(|g| (g.id, g.x, g.y)).collect::<Vec<_>>(),
+            composed.glyphs.iter().map(|g| (g.id, g.x, g.y)).collect::<Vec<_>>()
+        );
+        assert_eq!(decomposed.bounds, composed.bounds);
+        assert_eq!(decomposed.caret(0).1, decomposed.caret(1).1, "base and combining mark occupy the same cell");
+        for text in ["葛\u{e0101}x", "👩\u{200d}👧x"] {
+            let lay = layout_uncached(text, &style, &para);
+            assert_eq!(lay.lines.len(), 2, "variation selectors and ZWJ sequences stay with their base");
+            assert_eq!(lay.lines[0].range, 0..text.len() - 1);
+            assert_eq!(lay.lines[1].range, text.len() - 1..text.len());
+        }
+    }
+
+    #[test]
+    fn vertical_kana_keep_decomposed_dakuten_in_the_same_cell() {
+        fonts::scan_system();
+        let Some(face) = fonts::all_faces().into_iter().find(|f| {
+            (f.info.family.contains("Hiragino") || f.info.family.contains("Shippori") || f.info.family.contains("BIZ UD"))
+                && "かがはぱ\u{3099}\u{309a}".chars().all(|c| f.has_char(c))
+        }) else {
+            eprintln!("SKIPPED: no Japanese font covering combining dakuten/handakuten");
+            return;
+        };
+        let style = TextStyle { family: face.info.family.clone(), style: face.info.style.clone(), ..st(48.0) };
+        let para = ParagraphStyle { vertical: true, ..Default::default() };
+        let nfd = layout_uncached("か\u{3099}は\u{309a}", &style, &para);
+        let nfc = layout_uncached("がぱ", &style, &para);
+        assert_eq!(nfd.lines.len(), 2);
+        assert_eq!(nfd.lines[0].range, 0..6);
+        assert_eq!(nfd.lines[1].range, 6..12);
+        assert_eq!(nfd.glyphs.iter().map(|g| (g.id, g.x, g.y)).collect::<Vec<_>>(), nfc.glyphs.iter().map(|g| (g.id, g.x, g.y)).collect::<Vec<_>>());
+        assert_eq!(nfd.bounds, nfc.bounds);
     }
 
     #[test]
