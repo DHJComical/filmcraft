@@ -13,6 +13,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, readdirSync, statSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { checkImportCollision } from "./import-collision.mjs";
 
 const arg = (k, d) => {
   const i = process.argv.indexOf(`--${k}`);
@@ -162,6 +163,17 @@ try {
   await sleep(500);
   await send("Emulation.setDeviceMetricsOverride", { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
   report.steps.modes = { screenshot: await shot("05-modes") };
+  report.steps.importCollision = await checkImportCollision({
+    evaluate: js,
+    url,
+    navigate: async (nextUrl) => {
+      await send("Page.navigate", { url: nextUrl });
+      await until("!!(window.filmcraftLoad && (window.filmcraftLoad.readyMs || window.filmcraftLoad.error))", 120000);
+      const load = await js("window.filmcraftLoad");
+      if (load.error) throw new Error(load.error);
+    },
+  });
+  if (!report.steps.importCollision.ok) throw new Error("import collision regression: " + JSON.stringify(report.steps.importCollision.gates));
   // still alive? (a panicked app never answers)
   await Promise.race([js("filmcraft.inspect().then(() => true)"), sleep(5000).then(() => { throw new Error("app stopped answering"); })]);
   const fatal = logs.filter((l) => /panicked at|RuntimeError|EXCEPTION/.test(l));
