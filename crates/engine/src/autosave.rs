@@ -22,12 +22,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use filmcraft_format::autosave as names;
 use filmcraft_project::Project;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::settings;
 
