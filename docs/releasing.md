@@ -77,6 +77,9 @@ deliberately, in every job at once.
 - **Notarization:** the app is sent with `xcrun notarytool submit`, then the ticket is stapled
   and checked with `stapler validate`. The app goes on a DMG (`hdiutil makehybrid`), which is
   signed and notarized too. The universal `filmcraft-cli` is signed the same way, zipped, and the zip is notarized.
+  Its Finder window (background, icon size and positions) comes from
+  [`packaging/macos/dmg/`](../packaging/macos/dmg/README.md), and its volume is named `FilmCraft`
+  without the version, which the window's background needs; the DMG file name keeps the version.
 
 Locally, without certificates, the script signs ad hoc and skips notarization, which is enough to
 check the bundle and the DMG on your own Mac (`packaging/macos/package.sh`).
