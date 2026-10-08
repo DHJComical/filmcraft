@@ -311,3 +311,11 @@ fn fs_full(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
     return vec4(select(hi, lo, c <= vec3(0.0031308)), 1.0);
 }
+
+// Effect inputs use only positive uniform decimation, without rotation or translation.
+// Reconstruct source coordinates from exact fragment centres: rasterizer interpolation of
+// `sp` can introduce tiny neighbours, amplified by gamma and alpha inversion at black/zero alpha.
+@fragment
+fn fs_fx_source(in: VOut) -> @location(0) vec4<f32> {
+    return layer_color(in.pos.xy / vec2(u.m0.x, u.m0.w));
+}

@@ -423,6 +423,7 @@ fn live_override_holds_and_ramps_back() {
 
 /// 24 tracks × 3 inserts (EQ, Dynamics, Studio Reverb) + a compressed submix at 48 kHz, one core.
 #[test]
+#[ignore = "hardware-dependent throughput benchmark; run explicitly on the benchmark host"]
 fn perf_24_tracks_3_effects_realtime_factor() {
     let r = busy_rig(24);
     let secs = if cfg!(debug_assertions) { 2.0 } else { 10.0 };

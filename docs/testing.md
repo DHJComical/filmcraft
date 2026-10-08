@@ -325,3 +325,11 @@ At load ~25–60 the same final build plays h264-1080, stack3 and h264-2160 at F
 in 3 of 3 runs (192/0) and render previews 192/0. The 4K fixture needs ~4 cores of decode per
 real-time second (≈160 ms CPU per frame at 170 Mbit/s); the demo project's procedural footage
 ~190 ms per Full-resolution frame.
+
+### Audio mixer throughput
+
+`cargo test --release -p filmcraft-render --lib perf_24_tracks_3_effects_realtime_factor -- --ignored --nocapture`
+runs the 24-track, 72-insert throughput benchmark. It retains the 4x realtime release target, but
+is opt-in like the other hardware benchmarks: portable functional CI must not depend on a host's
+single-core throughput or scheduling. The mixer correctness tests remain enabled. On non-Unix
+hosts its existing timer falls back to wall time; record that limitation with the machine and result.

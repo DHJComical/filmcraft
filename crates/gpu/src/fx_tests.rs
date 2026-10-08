@@ -489,3 +489,15 @@ fn layers_with_effects_fall_back_to_the_cpu_without_a_stage() {
         assert!(p99 <= 6 && mean < 1.5, "stage {stage}: p99 {p99}, mean {mean}");
     }
 }
+
+#[test]
+fn effect_source_identity_preserves_black_and_transparent_pixels() {
+    let Some((dev, q)) = device() else { return };
+    let mut c = GpuCompositor::new(&dev, &q);
+    let (w, h) = (67, 41);
+    let px = picture(w, h);
+    let frame = VideoFrame::rgba_f32(w, h, px.clone());
+    let fx = LayerFx { size: (w, h), decimation: 1, ops: vec![] };
+    let (_, _, got) = c.effect_image(&frame, &fx).expect("working image");
+    assert_eq!(got, px, "identity import must not sample neighbouring transparent or black pixels");
+}
