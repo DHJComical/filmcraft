@@ -173,7 +173,7 @@ pub fn factory(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettin
     }
 }
 
-/// The H.265 side of [`factory`]: the only HEVC encoder on Windows, so the Hardware encoding toggle
+/// The H.265 side of [`factory`]: FilmCraft's only HEVC encoder on Windows, so the Hardware encoding toggle
 /// does not apply and a request NVENC cannot take is an error, not a fall-through.
 fn hevc_factory(w: u32, h: u32, rate: FrameRate, s: &ExportSettings) -> Option<Result<Box<dyn VideoEncoder>>> {
     let declined = |why: &str| {
@@ -190,12 +190,12 @@ fn hevc_factory(w: u32, h: u32, rate: FrameRate, s: &ExportSettings) -> Option<R
             filmcraft_export::note_hw_encode_session();
             Some(Ok(Box::new(NvencEncoder { enc, w, h, rate, y: Vec::new(), u: Vec::new(), v: Vec::new() })))
         }
-        Err(why) => {
-            log::info!("hardware H.265 encoding declined: {why}");
-            filmcraft_export::note_hw_encode_declined();
-            // no HEVC encoder here at all: the export's own "encoder not available" error
-            if super::hevc_available() { Some(Err(ExportError::Unsupported(format!("H.265 export with NVENC: {why}")))) } else { None }
+        // no HEVC encoder here at all: not a hardware attempt, the export's own "encoder not available" error
+        Err(why) if !super::hevc_available() => {
+            log::info!("no hardware H.265 encoder: {why}");
+            None
         }
+        Err(why) => declined(&why),
     }
 }
 

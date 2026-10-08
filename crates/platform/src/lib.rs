@@ -68,11 +68,13 @@ pub fn register() -> Availability {
         filmcraft_codecs::hw::set_hw_backend("VideoToolbox");
         Availability::Available("VideoToolbox")
     }
-    // Export ▸ H.265: NVENC is the only HEVC encoder on Windows, so the format is available when a
-    // small HEVC session opens (asked once, when the format list first asks)
+    // Export ▸ H.265: NVENC is FilmCraft's only HEVC encoder on Windows, so the format is available
+    // when a small HEVC session opens. That takes about half a second, so it is asked on a thread of
+    // its own now rather than by the first draw of the format list.
     #[cfg(target_os = "windows")]
     {
         filmcraft_export::register_format_probe(filmcraft_export::Format::Hevc, nvenc::hevc_available);
+        nvenc::warm_hevc_probe();
     }
     #[cfg(target_os = "windows")]
     {

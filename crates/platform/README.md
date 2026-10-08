@@ -147,9 +147,11 @@ level to the encoder). The H.264 path is unchanged: the same export is the same 
 
 - **Choosing the format is the opt-in,** as on macOS: Export ▸ Format ▸ H.265 (HEVC) or
   `"format": "hevc"`. `register()` hands `nvenc::hevc_available` to
-  `filmcraft_export::register_format_probe`: one small HEVC session (a 640×360 encoder, created on
-  the first question and the answer kept; about half a second in a fresh process, nearly all of it
-  opening the Direct3D 11 device and the NVENC session, which every NVENC export pays too). The
+  `filmcraft_export::register_format_probe`: one small HEVC session (a 640×360 encoder, the answer
+  kept; about half a second in a fresh process, nearly all of it opening the Direct3D 11 device and
+  the NVENC session, which every NVENC export pays too). `register()` also asks it on a thread of its
+  own (`nvenc::warm_hevc_probe`), so the first draw of the format list does not wait for it; a
+  caller that asks while it runs waits for the same answer. The
   Hardware encoding toggle governs H.264 only: with H.265 selected NVENC is used whether it is Auto
   or Off, because nothing else can encode it.
 - **What it writes:** HEVC Main, 8-bit 4:2:0, SDR BT.709 limited range (the VUI says so, with the
@@ -211,6 +213,7 @@ level to the encoder). The H.264 path is unchanged: the same export is the same 
 | `tests/nvenc_hevc.rs` (Windows, NVIDIA with HEVC) | HEVC from NVENC (1280×720, 6 Mbps, 72 frames, keyframe every 24) decodes with our HEVC decoder at worst 48.9 dB luma / 51.0 dB chroma PSNR; IDR at 0, 24, 48; dts strictly increasing, pts a permutation, `sps_max_num_reorder_pics` within the dts shift; no parameter sets in the samples; the `hvcC`'s profile / tier / level bytes are the SPS's own; VUI BT.709 limited and timing `(1, 24)`; hostile configurations, sizes, planes and encoders dropped mid-stream give errors, never panics; keyframes every 1–2 pictures without B-frames |
 | `tests/nvenc_hevc_export.rs` (Windows, NVIDIA with HEVC) | H.265 export through the real pipeline, MP4 and QuickTime, toggle Auto and Off: counters (72 frames, 1 session, 0 declined), our decoder against the software H.264 export at worst 54.8 dB luma PSNR, ffprobe `codec_name=hevc`, `profile=Main`, `codec_tag_string=hvc1`, `pix_fmt=yuv420p`, BT.709 limited, 72 frames, 24/1, keyframes at 0 and 48, start 0, `ffmpeg -xerror` clean; with AAC audio; 1920×1080 and 642×362 cropped back from the coded size; every decline (HDR, analysis pass, two-pass, interlaced, non-square pixels, MXF, sizes over 65535, odd sizes, sizes outside the GPU's limits) an error naming NVENC, counted once; H.264 with hardware encoding Off never touches NVENC |
 | `tests/nvenc_hevc_probe.rs` (Windows) | the HEVC probe in a fresh process: its cost, the cached answer, `available(Hevc)` following it after `register()` (twice) |
+| `tests/nvenc_hevc_warm.rs` (Windows) | `register()` answers the HEVC question on a thread of its own, before anyone asks; the answer is kept |
 | `src/nvenc/abi_tests.rs` (Windows) | FFI structs' sizes, alignments, field offsets, constants, GUIDs and the bit-field masks of the `flags` words (H.264 and HEVC) against a C compiler's view of NVIDIA's `nvEncodeAPI.h` (12.1) |
 | `src/nvenc/{mod,hevc}.rs` unit tests (Windows) | HEVC NAL types, stripping and parameter-set splitting (including `IDR_N_LP`, whose header byte reads as a PPS in H.264, and one-byte or truncated NAL units); the `hvcC` built from real VPS / SPS / PPS, every truncation and bit flip of the SPS, wrong profile, size and NAL types; HEVC levels |
 

@@ -72,8 +72,9 @@ are never linked or shipped ([AGENTS.md](../AGENTS.md) §2).
   AV1 fixtures (libvpx-vp9, libaom-av1; 360p, 1080p, 2160p, hidden alt-ref frames, two GOPs) need an ffmpeg with those encoders.
 
 The NVENC tests (`crates/platform/tests/nvenc.rs` and `nvenc_export.rs` for H.264, `nvenc_hevc.rs`,
-`nvenc_hevc_export.rs` and `nvenc_hevc_probe.rs` for H.265; Windows only) skip, printing `SKIPPED`,
-without an NVIDIA GPU with NVENC (H.265: with an HEVC encoder). The FFI layout tests in
+`nvenc_hevc_export.rs`, `nvenc_hevc_probe.rs` and `nvenc_hevc_warm.rs` for H.265; Windows only) skip,
+printing `SKIPPED`, without an NVIDIA GPU with NVENC (H.265: when the HEVC probe says there is no HEVC
+encoder; on a machine that has one, a configuration NVENC refuses fails the test). The FFI layout tests in
 `crates/platform/src/nvenc/abi_tests.rs` were generated from a C program built with MSVC
 (`cl` after `vcvars64.bat`) against NVIDIA's MIT-licensed `nvEncodeAPI.h` (12.1); the header and the
 program are not in the repository. To regenerate them, put the header in a scratch directory and

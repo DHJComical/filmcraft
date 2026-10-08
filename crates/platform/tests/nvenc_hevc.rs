@@ -48,14 +48,14 @@ static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 type Sources = Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>;
 
+/// `None` (the test skips) only on a machine without an HEVC encoder; on one that has it, a
+/// configuration NVENC refuses is a failure, not a skip.
 fn encode_all(cfg: &Config, frames: usize) -> Option<(Nvenc, Vec<Packet>, Sources)> {
-    let mut enc = match Nvenc::new(cfg) {
-        Ok(e) => e,
-        Err(why) => {
-            eprintln!("SKIPPED: {why}");
-            return None;
-        }
-    };
+    if !hevc_available() {
+        eprintln!("SKIPPED: no NVENC HEVC encoder");
+        return None;
+    }
+    let mut enc = Nvenc::new(cfg).unwrap_or_else(|why| panic!("NVENC HEVC is available but refused {cfg:?}: {why}"));
     let (w, h) = (cfg.width as usize, cfg.height as usize);
     let (mut y, mut u, mut v) = (Vec::new(), Vec::new(), Vec::new());
     let (mut packets, mut sources) = (Vec::new(), Vec::new());

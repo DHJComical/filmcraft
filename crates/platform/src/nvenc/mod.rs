@@ -120,8 +120,7 @@ pub fn available() -> bool {
 /// Whether this system's NVENC can encode HEVC: a session opened and an HEVC encoder created for a
 /// small picture, once (the answer is kept). What makes the H.265 export format available.
 pub fn hevc_available() -> bool {
-    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
+    *HEVC_AVAILABLE.get_or_init(|| {
         let probe = Config {
             width: 640,
             height: 360,
@@ -141,6 +140,32 @@ pub fn hevc_available() -> bool {
         }
         result.is_ok()
     })
+}
+
+/// The answer of [`hevc_available`], once asked.
+static HEVC_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Ask [`hevc_available`] on a thread of its own (once, however often this is called), so the
+/// first draw of Export's format list does not wait for the probe session. Whoever asks while it
+/// runs waits for the same answer; if the thread cannot start, or the probe panics (caught), the
+/// first caller asks, as before.
+pub fn warm_hevc_probe() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let spawned = std::thread::Builder::new().name("nvenc-hevc-probe".into()).spawn(|| {
+            if std::panic::catch_unwind(hevc_available).is_err() {
+                log::warn!("the hardware HEVC probe panicked; the format list will ask again");
+            }
+        });
+        if let Err(e) = spawned {
+            log::info!("hardware HEVC probe thread not started: {e}");
+        }
+    });
+}
+
+/// Whether [`hevc_available`] has its answer yet (diagnostics and tests).
+pub fn hevc_probed() -> bool {
+    HEVC_AVAILABLE.get().is_some()
 }
 
 impl Nvenc {
