@@ -261,6 +261,15 @@ CRAFT_FONTS_DIR="$PWD/../craft-fonts" cargo run --release -p filmcraft
 
 The control protocol is documented in [docs/control-protocol.md](docs/control-protocol.md). Stuck, or want to show what you made? Ask in [Discord](https://discord.gg/artcraft).
 
+Each [GitHub release](https://github.com/storytold/filmcraft/releases) has ready-made builds, on Linux as an AppImage, a `.deb`, an `.rpm` and a tarball. On Gentoo, the community [::snakebyte overlay](https://github.com/switch87/snakebyte-overlay) packages the Linux release as `media-video/filmcraft-bin` (not maintained by the FilmCraft team):
+
+```sh
+eselect repository add snakebyte git https://github.com/switch87/snakebyte-overlay.git
+emaint sync -r snakebyte
+echo 'media-video/filmcraft-bin ~amd64' >> /etc/portage/package.accept_keywords/filmcraft
+emerge --ask media-video/filmcraft-bin
+```
+
 ## Documentation
 
 | | |
