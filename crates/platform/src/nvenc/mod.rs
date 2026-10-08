@@ -1,23 +1,27 @@
-//! NVIDIA NVENC H.264 hardware encoding (Windows).
+//! NVIDIA NVENC hardware encoding, H.264 and H.265 (HEVC) Main (Windows).
 //!
 //! The encoder runs on the GPU's NVENC engine through the driver's `nvEncodeAPI64.dll` (API 12.1,
 //! [`ffi`]; no CUDA, no SDK to install): pictures go in as NV12 input buffers, the Annex B output
-//! comes back as length-prefixed H.264 samples with the parameter sets split out for the `avcC`.
-//! [`export`] plugs it into Export as an alternative to the software encoder.
+//! comes back as length-prefixed samples with the parameter sets split out for the `avcC` (H.264)
+//! or the `hvcC` (HEVC, see [`hevc`]). One session, ring and NV12 path serves both codecs; the
+//! codec only chooses the GUIDs, the codec configuration and how NAL units are told apart.
+//! [`export`] plugs it into Export: as an alternative to the software encoder for H.264, and as the
+//! only encoder of the H.265 format (which has no software encoder).
 //!
 //! ```text
 //! RGBA (the export pipeline) ──► BT.709 limited 4:2:0 (the software encoder's conversion)
-//!    ──► NV12 input buffer ──NVENC──► Annex B ──► length-prefixed samples + avcC
+//!    ──► NV12 input buffer ──NVENC──► Annex B ──► length-prefixed samples + avcC / hvcC
 //! ```
 //!
 //! `unsafe` is confined to `ffi` (data) and `session` (every driver call); this module is safe
-//! code. Hardware encoding never replaces an export that works in software: the factory declines
-//! what NVENC cannot do (no NVIDIA GPU or driver, sizes, HDR, two-pass, MXF...) and the software
-//! encoder takes over.
+//! code. Hardware H.264 encoding never replaces an export that works in software: the factory
+//! declines what NVENC cannot do (no NVIDIA GPU or driver, sizes, HDR, two-pass, MXF...) and the
+//! software encoder takes over. A declined HEVC export is an error that says why.
 
 pub mod export;
 #[allow(unsafe_code)]
 mod ffi;
+pub mod hevc;
 #[allow(unsafe_code)]
 mod session;
 
@@ -26,15 +30,29 @@ mod abi_tests;
 
 use std::collections::VecDeque;
 
-pub use self::session::{Caps, Params};
+use filmcraft_isobmff::HevcConfig;
+
+pub use self::session::{Caps, Codec, Params};
 use self::session::{Locked, Session, Submitted};
 
-/// H.264 profile (`profile_idc` 66 / 77 / 100).
+/// H.264 profile (`profile_idc` 66 / 77 / 100), or HEVC Main (8-bit 4:2:0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Profile {
     Baseline,
     Main,
     High,
+    /// H.265 Main: chooses the HEVC codec (like `VtProfile::HevcMain` for VideoToolbox).
+    HevcMain,
+}
+
+impl Profile {
+    /// The codec this profile belongs to.
+    pub fn codec(self) -> Codec {
+        match self {
+            Profile::HevcMain => Codec::Hevc,
+            _ => Codec::H264,
+        }
+    }
 }
 
 /// What to encode.
@@ -50,7 +68,7 @@ pub struct Config {
     /// Frames between IDR pictures.
     pub keyint: u32,
     pub profile: Profile,
-    /// Level × 10 (41 = 4.1); `None` lets the encoder pick.
+    /// Level × 10 (41 = 4.1), for either codec; `None` lets the encoder pick.
     pub level: Option<u8>,
     /// Sample aspect ratio.
     pub sar: Option<(u32, u32)>,
@@ -71,11 +89,16 @@ pub struct Packet {
 /// Pictures in flight: input / output buffer pairs.
 const RING: usize = 8;
 
-/// An NVENC H.264 encoder.
-pub struct NvencH264 {
+/// An NVENC encoder (H.264, or HEVC when the profile is [`Profile::HevcMain`]).
+pub struct Nvenc {
     session: Session,
+    codec: Codec,
+    /// Empty for H.264.
+    vps: Vec<u8>,
     sps: Vec<u8>,
     pps: Vec<u8>,
+    /// The `hvcC` record (HEVC only), built from the parameter sets the encoder wrote.
+    hvcc: Option<HevcConfig>,
     /// Frames the output is delayed by reordering (0 or 1).
     delay: u32,
     free: Vec<usize>,
@@ -86,12 +109,41 @@ pub struct NvencH264 {
     size: (u32, u32),
 }
 
+/// The H.264 encoder (the name it had before HEVC joined it).
+pub type NvencH264 = Nvenc;
+
 /// Whether this system has an NVIDIA GPU with a driver that has NVENC.
 pub fn available() -> bool {
     Session::open().is_ok()
 }
 
-impl NvencH264 {
+/// Whether this system's NVENC can encode HEVC: a session opened and an HEVC encoder created for a
+/// small picture, once (the answer is kept). What makes the H.265 export format available.
+pub fn hevc_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let probe = Config {
+            width: 640,
+            height: 360,
+            fps: (30, 1),
+            bitrate_kbps: 2000,
+            max_bitrate_kbps: 3000,
+            cbr: false,
+            keyint: 30,
+            profile: Profile::HevcMain,
+            level: None,
+            sar: None,
+            bframes: false,
+        };
+        let result = Nvenc::new(&probe);
+        if let Err(why) = &result {
+            log::info!("no hardware HEVC encoder: {why}");
+        }
+        result.is_ok()
+    })
+}
+
+impl Nvenc {
     /// Open an encoder, or say why NVENC does not take this configuration.
     pub fn new(cfg: &Config) -> Result<Self, String> {
         let (w, h) = (cfg.width, cfg.height);
@@ -101,13 +153,22 @@ impl NvencH264 {
         if cfg.fps.0 == 0 || cfg.fps.1 == 0 {
             return Err("frame rate".into());
         }
+        let codec = cfg.profile.codec();
+        let level = match (codec, cfg.level) {
+            (Codec::Hevc, Some(l)) => Some(hevc::level_code(l).ok_or_else(|| format!("{}.{} is not an HEVC level", l / 10, l % 10))?),
+            (_, l) => l,
+        };
         let mut session = Session::open()?;
-        let caps = session.caps()?;
+        let caps = session.caps(codec)?;
         if w < caps.min_size.0 || h < caps.min_size.1 || w > caps.max_size.0 || h > caps.max_size.1 {
             return Err(format!("{w}x{h} is outside NVENC's {}x{} - {}x{}", caps.min_size.0, caps.min_size.1, caps.max_size.0, caps.max_size.1));
         }
-        let bframes = u32::from(cfg.bframes && cfg.profile != Profile::Baseline && caps.max_bframes >= 1);
+        // NVENC wants a GOP longer than the B-frame pattern: HEVC with a keyframe every one or two
+        // pictures is simply written without B-frames (H.264 keeps declining those, to the software encoder)
+        let room_for_bframes = codec == Codec::H264 || cfg.keyint > 2;
+        let bframes = u32::from(cfg.bframes && cfg.profile != Profile::Baseline && caps.max_bframes >= 1 && room_for_bframes);
         let params = Params {
+            codec,
             width: w,
             height: h,
             fps: cfg.fps,
@@ -117,22 +178,62 @@ impl NvencH264 {
             gop: cfg.keyint.max(1),
             profile: match cfg.profile {
                 Profile::Baseline => 0,
-                Profile::Main => 1,
+                Profile::Main | Profile::HevcMain => 1,
                 Profile::High => 2,
             },
-            level: cfg.level,
+            level,
             sar: cfg.sar,
             bframes,
         };
         session.initialize(&params, RING)?;
-        let (sps, pps) = split_parameter_sets(&session.sequence_params()?)?;
+        let params = session.sequence_params()?;
+        let (vps, sps, pps, hvcc) = match codec {
+            Codec::H264 => {
+                let (sps, pps) = split_parameter_sets(&params)?;
+                (Vec::new(), sps, pps, None)
+            }
+            Codec::Hevc => {
+                let (vps, sps, pps) = split_hevc_parameter_sets(&params)?;
+                // validated now: a stream whose parameter sets we cannot describe is a declined export
+                let record = hevc::hevc_config(&vps, &sps, &pps, (w, h))?;
+                (vps, sps, pps, Some(record))
+            }
+        };
         let slots = session.slots();
-        Ok(Self { session, sps, pps, delay: bframes, free: (0..slots).rev().collect(), pending: VecDeque::new(), ready: 0, emitted: 0, size: (w, h) })
+        Ok(Self {
+            session,
+            codec,
+            vps,
+            sps,
+            pps,
+            hvcc,
+            delay: bframes,
+            free: (0..slots).rev().collect(),
+            pending: VecDeque::new(),
+            ready: 0,
+            emitted: 0,
+            size: (w, h),
+        })
+    }
+
+    /// The codec this encoder writes.
+    pub fn codec(&self) -> Codec {
+        self.codec
     }
 
     /// The sequence and picture parameter sets (NAL units without start codes).
     pub fn parameter_sets(&self) -> (&[u8], &[u8]) {
         (&self.sps, &self.pps)
+    }
+
+    /// The video parameter set (HEVC; empty for H.264).
+    pub fn vps(&self) -> &[u8] {
+        &self.vps
+    }
+
+    /// The `hvcC` record of an HEVC stream (`None` for H.264).
+    pub fn hevc_config(&self) -> Option<&HevcConfig> {
+        self.hvcc.as_ref()
     }
 
     /// Frames the decoding time runs behind the presentation time (B-frame reordering).
@@ -193,7 +294,7 @@ impl NvencH264 {
         let r = self.session.read(slot);
         self.free.push(slot);
         let o = r?;
-        let data = annex_b_to_length_prefixed(&o.data)?;
+        let data = annex_b_to_length_prefixed_for(self.codec, &o.data)?;
         let k = self.emitted;
         self.emitted = self.emitted.saturating_add(1);
         let pts = i64::try_from(o.pts).unwrap_or(i64::MAX);
@@ -256,16 +357,41 @@ pub fn annex_b_nals(data: &[u8]) -> Vec<&[u8]> {
 /// Annex B to 4-byte length-prefixed NAL units, dropping parameter sets (they live in the `avcC`)
 /// and access unit delimiters. Errors on a stream without NAL units.
 pub fn annex_b_to_length_prefixed(data: &[u8]) -> Result<Vec<u8>, String> {
+    annex_b_to_length_prefixed_for(Codec::H264, data)
+}
+
+/// The NAL unit type of a NAL unit (`None` when it is too short to have a header).
+pub fn nal_type(codec: Codec, nal: &[u8]) -> Option<u8> {
+    match codec {
+        Codec::H264 => nal.first().map(|b| b & 0x1f),
+        // two header bytes: forbidden_zero_bit, nal_unit_type (6), layer id (6), temporal id plus 1 (3)
+        Codec::Hevc => match nal {
+            [b, _, ..] => Some((b >> 1) & 0x3f),
+            _ => None,
+        },
+    }
+}
+
+/// [`annex_b_to_length_prefixed`] for a codec: H.264 drops SPS / PPS / AUD (types 7 to 9); HEVC drops
+/// VPS / SPS / PPS / AUD (32 to 35) and end-of-sequence / end-of-bitstream markers (36, 37), since
+/// the file is one coded video sequence. A NAL unit too short for its header is dropped.
+pub fn annex_b_to_length_prefixed_for(codec: Codec, data: &[u8]) -> Result<Vec<u8>, String> {
     let nals = annex_b_nals(data);
     if nals.is_empty() {
         return Err("the encoder produced no NAL units".into());
     }
     let mut out = Vec::with_capacity(data.len());
     for n in nals {
-        if n.first().is_none_or(|b| matches!(b & 0x1f, 7..=9)) {
+        let dropped = match (codec, nal_type(codec, n)) {
+            (_, None) => true,
+            (Codec::H264, Some(t)) => matches!(t, 7..=9),
+            (Codec::Hevc, Some(t)) => matches!(t, 32..=37),
+        };
+        if dropped {
             continue;
         }
-        out.extend_from_slice(&(n.len() as u32).to_be_bytes());
+        let len = u32::try_from(n.len()).map_err(|_| "a NAL unit longer than 4 GiB".to_string())?;
+        out.extend_from_slice(&len.to_be_bytes());
         out.extend_from_slice(n);
     }
     if out.is_empty() {
@@ -281,6 +407,16 @@ pub fn split_parameter_sets(data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
     match (find(7), find(8)) {
         (Some(s), Some(p)) => Ok((s, p)),
         _ => Err("the encoder returned no SPS / PPS".into()),
+    }
+}
+
+/// The VPS, SPS and PPS NAL units of an Annex B byte string from an HEVC encoder.
+pub fn split_hevc_parameter_sets(data: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
+    let nals = annex_b_nals(data);
+    let find = |t: u8| nals.iter().find(|n| nal_type(Codec::Hevc, n) == Some(t)).map(|n| n.to_vec());
+    match (find(32), find(33), find(34)) {
+        (Some(v), Some(s), Some(p)) => Ok((v, s, p)),
+        _ => Err("the encoder returned no VPS / SPS / PPS".into()),
     }
 }
 
@@ -335,5 +471,90 @@ mod tests {
         assert!(annex_b_nals(&[0, 0, 1, 0, 0, 1]).is_empty());
         assert!(annex_b_to_length_prefixed(&[0, 0, 1, 0, 0, 0, 1]).is_err());
         assert!(split_parameter_sets(&[0, 0, 1]).is_err());
+    }
+
+    // HEVC NAL unit headers: type in bits 1..=6 of the first byte (VPS 0x40, SPS 0x42, PPS 0x44, AUD 0x46,
+    // EOS 0x48, EOB 0x4a, IDR_W_RADL 0x26, IDR_N_LP 0x28, TRAIL_R 0x02, prefix SEI 0x4e, suffix SEI 0x50)
+    #[test]
+    fn hevc_nal_types_come_from_the_second_header_bit_range() {
+        assert_eq!(nal_type(Codec::Hevc, &[0x40, 0x01]), Some(32));
+        assert_eq!(nal_type(Codec::Hevc, &[0x26, 0x01, 9]), Some(19));
+        assert_eq!(nal_type(Codec::Hevc, &[0x28, 0x01]), Some(20));
+        assert_eq!(nal_type(Codec::Hevc, &[0x4e, 0x01]), Some(39));
+        assert_eq!(nal_type(Codec::Hevc, &[0x50, 0x01]), Some(40));
+        // the H.264 reading of the same bytes is different (and wrong for HEVC)
+        assert_eq!(nal_type(Codec::H264, &[0x28, 0x01]), Some(8));
+        // no header, no type
+        assert_eq!(nal_type(Codec::Hevc, &[]), None);
+        assert_eq!(nal_type(Codec::Hevc, &[0x40]), None);
+        assert_eq!(nal_type(Codec::H264, &[]), None);
+    }
+
+    #[test]
+    fn hevc_samples_keep_slices_and_sei_and_lose_parameter_sets_and_delimiters() {
+        let s = [
+            &[0, 0, 0, 1, 0x46, 0x01, 0x50][..], // AUD
+            &[0, 0, 0, 1, 0x40, 0x01, 1, 2],     // VPS
+            &[0, 0, 0, 1, 0x42, 0x01, 3],        // SPS
+            &[0, 0, 1, 0x44, 0x01, 4],           // PPS
+            &[0, 0, 1, 0x4e, 0x01, 5, 5],        // prefix SEI
+            &[0, 0, 0, 1, 0x28, 0x01, 6, 6, 6],  // IDR_N_LP: its header byte is 0x28, a PPS to an H.264 reader
+            &[0, 0, 1, 0x26, 0x01, 7],           // IDR_W_RADL
+            &[0, 0, 1, 0x02, 0x01, 8],           // TRAIL_R
+            &[0, 0, 1, 0x50, 0x01, 9],           // suffix SEI
+            &[0, 0, 1, 0x48, 0x01],              // end of sequence
+            &[0, 0, 1, 0x4a, 0x01],              // end of bitstream
+        ]
+        .concat();
+        let out = annex_b_to_length_prefixed_for(Codec::Hevc, &s).unwrap();
+        let expected: Vec<u8> = [
+            &[0, 0, 0, 4, 0x4e, 0x01, 5, 5][..],
+            &[0, 0, 0, 5, 0x28, 0x01, 6, 6, 6],
+            &[0, 0, 0, 3, 0x26, 0x01, 7],
+            &[0, 0, 0, 3, 0x02, 0x01, 8],
+            &[0, 0, 0, 3, 0x50, 0x01, 9],
+        ]
+        .concat();
+        assert_eq!(out, expected);
+        // the same stream read as H.264 loses and keeps the wrong NAL units
+        assert_ne!(annex_b_to_length_prefixed(&s).unwrap(), expected);
+    }
+
+    #[test]
+    fn hevc_parameter_sets_are_found_by_type() {
+        let s = [0, 0, 0, 1, 0x40, 0x01, 1, 0, 0, 0, 1, 0x42, 0x01, 2, 0, 0, 1, 0x44, 0x01, 3, 0, 0, 1, 0x26, 0x01, 4];
+        assert_eq!(split_hevc_parameter_sets(&s).unwrap(), (vec![0x40, 1, 1], vec![0x42, 1, 2], vec![0x44, 1, 3]));
+        // an H.264 SPS / PPS pair has none of them; one missing is an error
+        assert!(split_hevc_parameter_sets(&[0, 0, 0, 1, 0x67, 1, 2, 0, 0, 1, 0x68, 3]).is_err());
+        assert!(split_hevc_parameter_sets(&[0, 0, 0, 1, 0x40, 0x01, 1, 0, 0, 1, 0x42, 0x01, 2]).is_err());
+    }
+
+    #[test]
+    fn hostile_hevc_streams_are_errors() {
+        // empty, no start code, only parameter sets / delimiters / markers, one-byte NAL units
+        for s in [
+            &[][..],
+            &[0, 0, 1],
+            &[1, 2, 3],
+            &[0, 0, 1, 0x46, 0x01, 0x50],
+            &[0, 0, 0, 1, 0x40, 0x01],
+            &[0, 0, 1, 0x26],
+            &[0, 0, 1, 0x48, 0x01],
+            &[0, 0, 1, 0xff],
+        ] {
+            assert!(annex_b_to_length_prefixed_for(Codec::Hevc, s).is_err(), "{s:?}");
+        }
+        // truncated slices are kept as they are (the decoder reports them), never panic
+        assert!(annex_b_to_length_prefixed_for(Codec::Hevc, &[0, 0, 1, 0x26, 0x01]).is_ok());
+        assert!(split_hevc_parameter_sets(&[]).is_err());
+        assert!(split_hevc_parameter_sets(&[0, 0, 1, 0x40]).is_err());
+    }
+
+    #[test]
+    fn the_hevc_profile_picks_the_hevc_codec() {
+        assert_eq!(Profile::HevcMain.codec(), Codec::Hevc);
+        for p in [Profile::Baseline, Profile::Main, Profile::High] {
+            assert_eq!(p.codec(), Codec::H264);
+        }
     }
 }

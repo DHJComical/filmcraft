@@ -6,7 +6,8 @@
 //! (`avcC`) and HEVC (`hvcC`) streams, 8- and 10-bit, 4:2:0 and 4:2:2; on other systems
 //! registration does nothing and reports [`Availability::Unavailable`]. It also registers a
 //! hardware H.264 encoder factory (`filmcraft_export::register_encoder`) that only acts when an
-//! export asks for it (`ExportSettings::hardware_encoding` = `Auto`), see [`hardware_encode`].
+//! export asks for it (`ExportSettings::hardware_encoding` = `Auto`), see [`hardware_encode`]; on
+//! macOS and on Windows (NVENC, [`nvenc`]) it also makes the H.265 export format available.
 //!
 //! Hardware decoding never makes a file undecodable:
 //!
@@ -66,6 +67,12 @@ pub fn register() -> Availability {
         filmcraft_export::register_format_probe(filmcraft_export::Format::Hevc, hardware_encode::hevc_available);
         filmcraft_codecs::hw::set_hw_backend("VideoToolbox");
         Availability::Available("VideoToolbox")
+    }
+    // Export ▸ H.265: NVENC is the only HEVC encoder on Windows, so the format is available when a
+    // small HEVC session opens (asked once, when the format list first asks)
+    #[cfg(target_os = "windows")]
+    {
+        filmcraft_export::register_format_probe(filmcraft_export::Format::Hevc, nvenc::hevc_available);
     }
     #[cfg(target_os = "windows")]
     {

@@ -21,10 +21,12 @@ type_complexity = "allow"
 undocumented_unsafe_blocks = "deny"
 
 [dependencies]
+filmcraft-bitstream = { workspace = true }
 filmcraft-codecs = { workspace = true }
 filmcraft-color = { workspace = true }
 filmcraft-export = { workspace = true }
 filmcraft-frame = { workspace = true }
+filmcraft-hevc = { workspace = true }
 filmcraft-isobmff = { workspace = true }
 filmcraft-time = { workspace = true }
 log = { workspace = true }
