@@ -259,13 +259,7 @@ pub struct GpuState {
 
 /// Largest texture side a plan needs on the GPU (output and every layer).
 fn plan_side(plan: &filmcraft_render::plan::FramePlan) -> usize {
-    use filmcraft_render::plan::FramePlan;
-    match plan {
-        FramePlan::Layers { width, height, layers } => {
-            layers.iter().map(|l| l.frame.width.max(l.frame.height) as usize).fold((*width).max(*height), usize::max)
-        }
-        FramePlan::Image(img) => img.w.max(img.h),
-    }
+    plan.max_side()
 }
 
 /// Whether the GPU compositor can run on this adapter: it renders and blends Rgba16Float

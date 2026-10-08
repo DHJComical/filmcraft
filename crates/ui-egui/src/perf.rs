@@ -31,6 +31,14 @@ pub fn stats(app: &FilmcraftApp) -> Value {
     frames["renderCostMs"] = json!(app.frames.render_cost() * 1e3);
     frames["cache"] = json!({"images": images, "imageMB": image_bytes as f64 / 1e6, "plans": plans, "planMB": plan_bytes as f64 / 1e6});
     v["frames"] = frames;
+    v["gpu"] = app.gpu.as_ref().map_or(Value::Null, |g| {
+        json!({
+            "uploadedBytes": g.compositor.uploaded_bytes,
+            "transitions": g.compositor.gpu_transitions,
+            "cpuTransitions": g.compositor.cpu_transitions,
+            "submitMs": g.last_ms,
+        })
+    });
     v["ui"] = json!({"fps": app.fps, "frameMs": if app.fps > 0.0 { 1000.0 / app.fps as f64 } else { 0.0 }});
     v["process"] = json!({"cpuS": crate::frames::process_cpu_time().map(|d| d.as_secs_f64())});
     v
