@@ -185,3 +185,53 @@ fn export_with_presets() {
     assert!(String::from_utf8_lossy(&bad.stderr).contains("No Such Preset"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `filmcraft-cli commands | head -c 10` panicked with "failed printing to stdout: Broken pipe
+/// (os error 32)" and exit status 101 (#285).
+#[test]
+fn closed_stdout_ends_quietly() {
+    use std::io::Read;
+    for args in [&["commands"][..], &["help"], &["--demo", "commands", "--json"]] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_filmcraft-cli")).args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let mut first = [0u8; 10];
+        child.stdout.as_mut().unwrap().read_exact(&mut first).unwrap();
+        drop(child.stdout.take());
+        let out = child.wait_with_output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && err.is_empty(), "{args:?}: {:?}: {err}", out.status);
+    }
+}
+
+/// `run -` with stdout already closed: `run` reads its script to the end before it prints, so its
+/// first write fails for sure. The rest of the script and the save still happen, and the exit status
+/// still reports a failing command.
+fn run_with_closed_stdout(args: &[&str], script: &[u8]) -> Output {
+    let mut child =
+        Command::new(env!("CARGO_BIN_EXE_filmcraft-cli")).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    drop(child.stdout.take());
+    child.stdin.take().unwrap().write_all(script).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn closed_stdout_still_runs_the_script_and_saves() {
+    let dir = std::env::temp_dir().join(format!("fc-cli-pipe-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let proj = dir.join("p.fcproj");
+    let p = proj.to_str().unwrap();
+    let script = b"{\"id\":\"file.newBin\",\"params\":{\"name\":\"Piped One\"}}\n{\"id\":\"file.newBin\",\"params\":{\"name\":\"Piped Two\"}}\n";
+    let out = run_with_closed_stdout(&["--demo", "--save-as", p, "run", "-"], script);
+    assert!(out.status.success(), "{:?}: {}", out.status, String::from_utf8_lossy(&out.stderr));
+    let tree = json_out(&cli(&["--project", p, "inspect", "project"])).to_string();
+    assert!(tree.contains("Piped One") && tree.contains("Piped Two"), "{tree}");
+
+    // a failing command is still a failure, whether or not anyone reads stdout
+    let out = run_with_closed_stdout(&["--demo", "run", "-"], b"{\"id\":\"no.such.command\"}\n");
+    assert_eq!(out.status.code(), Some(1));
+    let out = run_with_closed_stdout(
+        &["--demo", "--keep-going", "run", "-"],
+        b"{\"id\":\"no.such.command\"}\n{\"id\":\"file.newBin\",\"params\":{\"name\":\"x\"}}\n",
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
