@@ -114,8 +114,10 @@ built-in encoder, which changes three things from H.264:
 - **Choosing the format is the opt-in.** No `hardware_encoding` setting: Export ▸ Format ▸ H.265
   (HEVC), or `"format": "hevc"` in `file.exportMedia` (`h265` is accepted too). The format is
   listed as available only on a machine with a hardware HEVC encoder: `register()` hands
-  `hardware_encode::hevc_available` (one small hardware session, created on the first question) to
-  `filmcraft_export::register_format_probe`.
+  `hardware_encode::hevc_available` (one small hardware session, about 0.1 s) to
+  `filmcraft_export::register_format_probe`, and asks it right away on a thread of its own
+  (`warm_hevc_probe`), so the first draw of the format list does not create the session on the UI
+  thread.
 - **There is no fallback encoder.** What the hardware path does not take is an error, not a
   different encoder: two-pass VBR is refused up front (`ExportSettings::validate`), HDR sequences
   are exported as SDR (the H.265 path is 8-bit), and odd sizes, non-square pixels or a machine
