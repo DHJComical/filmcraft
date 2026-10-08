@@ -535,10 +535,15 @@ impl FrameServer {
             // A new frame on screen for this view replaces the one asked for before: scrubbing
             // asks for one per refresh, and without this the oldest position would decode
             // first (or keep a decoder busy seeking to it) while the newest waits.
+            //
+            // A job already running for the same frame at an older revision (a value being
+            // dragged asks for a new revision per refresh) is left to finish: it needs the same
+            // source frames, so it holds no decoder back, and when frames take longer than a
+            // refresh, cancelling each one for the next would show nothing until the mouse rests.
             let same_view = |k: &FrameKey| k.target == key.target && k.size == key.size;
             q.retain(|j| !(j.prio == 0 && !j.prefetch && same_view(&j.key)));
             for (k, c, prefetch) in self.shared.in_flight.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-                if !prefetch && *k != key && same_view(k) {
+                if !prefetch && same_view(k) && k.frame != key.frame {
                     c.store(true, Ordering::Relaxed);
                 }
             }

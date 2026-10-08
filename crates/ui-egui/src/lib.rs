@@ -200,6 +200,11 @@ pub struct FilmcraftApp {
     /// A paused monitor drew a stand-in (nearest cached) picture last frame: its exact frame is
     /// still decoding.
     pub(crate) monitor_inexact: bool,
+    /// Per monitor: the frames it asked for on its latest paused passes, oldest first (stand-ins
+    /// while the newest renders, see `panels::monitor`).
+    pub(crate) monitor_asked: HashMap<String, std::collections::VecDeque<FrameKey>>,
+    /// The frame whose picture the Program monitor drew last: the frame due, or its stand-in.
+    pub(crate) program_shown: Option<FrameKey>,
     /// Consecutive frames the timeline zoom / scroll has been at rest. `ui.elements` answers from
     /// the frame before the last one, so its timeline rects are final from 2 on.
     pub(crate) timeline_still: u32,
@@ -396,6 +401,8 @@ impl FilmcraftApp {
             pending_screenshots: Vec::new(),
             queued_screenshots: Vec::new(),
             monitor_inexact: false,
+            monitor_asked: HashMap::new(),
+            program_shown: None,
             timeline_still: 0,
             input_waiters: Vec::new(),
             next_token: 1,
@@ -890,6 +897,17 @@ impl FilmcraftApp {
 
     pub fn texture_existing(&self, name: &str) -> Option<(egui::TextureId, egui::Vec2)> {
         self.textures.get(name).map(|(_, t)| (t.id(), t.size_vec2()))
+    }
+
+    /// The frame a named texture shows.
+    pub fn texture_key(&self, name: &str) -> Option<FrameKey> {
+        self.textures.get(name).map(|(k, _)| *k)
+    }
+
+    /// The frame whose picture the Program monitor drew last: the frame due at the playhead, or
+    /// the stand-in shown while that one renders (`perf.stats`, tests).
+    pub fn program_picture(&self) -> Option<FrameKey> {
+        self.program_shown
     }
 
     /// Get a thumbnail texture for an item at a media time (requested at low priority).
