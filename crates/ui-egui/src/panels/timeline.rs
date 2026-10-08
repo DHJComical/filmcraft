@@ -2066,12 +2066,16 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
     }
 
     // ---- context menu on clips (right-clicking an unselected clip selects it first)
+    // the clip right-clicked, remembered while its menu is open: Unlink leaves only it selected
+    let menu_clip_id = egui::Id::new("timeline.clipMenu.clip");
     if resp.secondary_clicked()
         && let Some(p) = resp.interact_pointer_pos()
         && let Hit::Clip { clip, .. } = hit(seq, layout, p)
-        && !app.session.state.selection.contains(&clip)
     {
-        let _ = app.session.execute("timeline.select", json!({"clips": [clip.0]}));
+        ctx.data_mut(|d| d.insert_temp(menu_clip_id, clip));
+        if !app.session.state.selection.contains(&clip) {
+            let _ = app.session.execute("timeline.select", json!({"clips": [clip.0]}));
+        }
     }
     resp.context_menu(|ui| {
         ui.set_min_width(220.0);
@@ -2108,8 +2112,18 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
                 let r = ui.add_enabled(!sel.is_empty() && app.session.is_enabled(cmd), egui::Button::new(label));
                 app.auto.add(&format!("timeline.clipMenu.{cmd}"), r.rect, label);
                 if r.clicked() {
-                    if let Err(e) = crate::menus::invoke(app, &ctx, cmd, json!({})) {
-                        app.ui.status = e;
+                    match crate::menus::invoke(app, &ctx, cmd, json!({})) {
+                        // Unlink (#220): the clips were selected together because they were linked;
+                        // keep only the one right-clicked, so it can be dragged away from the others
+                        Ok(v) if cmd == "clip.link" && v["linked"] == json!(false) => {
+                            if let Some(clip) = ctx.data(|d| d.get_temp::<ClipId>(menu_clip_id))
+                                && app.session.state.selection.contains(&clip)
+                            {
+                                let _ = app.session.execute("timeline.select", json!({"clips": [clip.0]}));
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => app.ui.status = e,
                     }
                     ui.close();
                 }
