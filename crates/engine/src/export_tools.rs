@@ -230,6 +230,9 @@ pub fn settings_from_params(s: &Session, p: &Value, cmd: &str) -> Result<(Option
     if let Some(v) = bool_p(p, "sdr") {
         settings.sdr = v;
     }
+    if let Some(v) = bool_p(p, "alpha") {
+        settings.alpha = v;
+    }
     match (crate::commands::checked_u32_p(p, "width", cmd)?, crate::commands::checked_u32_p(p, "height", cmd)?) {
         (Some(w), Some(h)) => settings.frame_size = Some((w, h)),
         (None, None) => {}

@@ -598,6 +598,11 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
             }
         });
     }
+    if matches!(s.format, Format::PngSequence | Format::TiffSequence) {
+        row(ui, t, "Alpha", |ui| {
+            check(ui, reg, "export.video.alpha", &mut s.alpha, "Include Alpha Channel");
+        });
+    }
     match s.video_format() {
         f @ (Format::H264 | Format::Hevc) => {
             let hevc = f == Format::Hevc;
