@@ -68,6 +68,16 @@ pub(crate) struct Pipeline {
     drop_frame: bool,
 }
 
+impl Drop for Pipeline {
+    /// The export is over, however it ended (done, failed, cancelled, dropped half way). The float
+    /// images its frames left on the shelves of `filmcraft_frame::pool` are the size of its frames,
+    /// which nothing else asks for, so free them instead of holding up to 320 MiB idle. A job still
+    /// rendering at that moment allocates a few images again; the pool is only a cache.
+    fn drop(&mut self) {
+        filmcraft_frame::pool::trim();
+    }
+}
+
 impl Pipeline {
     pub fn new(project: Arc<Project>, seq: ItemId, settings: &ExportSettings, hdr_out: bool) -> Result<Self> {
         let q = project.sequence(seq).ok_or(ExportError::NoSequence)?;

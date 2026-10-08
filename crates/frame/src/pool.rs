@@ -9,6 +9,9 @@
 //! The compositor's working images (premultiplied linear `f32`, 33 MB at 1080p) get the same
 //! treatment ([`take_f32_overwritten`], [`recycle_f32`]): allocated and freed once per layer per
 //! frame they cost a zero-fill and fresh page faults every time.
+//!
+//! The shelves are sized for the busiest work, so they are a lot to keep once it is over: whoever
+//! finishes such work (an export) calls [`trim`].
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -136,6 +139,19 @@ pub fn recycle(frame: Arc<VideoFrame>) {
         PixelData::Yuv8 { planes, alpha, .. } => planes.into_iter().chain(alpha).for_each(|p| give(&U8, p)),
         PixelData::Yuv16 { planes, alpha, .. } => planes.into_iter().chain(alpha).for_each(|p| give(&U16, p)),
     }
+}
+
+/// Free every idle buffer. An export leaves the shelves full (up to [`F32_MAX_BYTES`] of float
+/// images, each the size of that export's frames, and [`MAX_BYTES`] of each plane type) and
+/// nothing else asks for those sizes again, so they would sit idle until the next export. What
+/// is still in use is not touched, and the next job starts cold, for the price of its first
+/// allocations.
+pub fn trim() {
+    // taken under the locks, freed after them: giving back hundreds of megabytes takes a moment
+    let floats = std::mem::take(&mut *F32.lock().unwrap_or_else(PoisonError::into_inner));
+    let planes8 = std::mem::replace(&mut *U8.lock().unwrap_or_else(PoisonError::into_inner), Shelf::new());
+    let planes16 = std::mem::replace(&mut *U16.lock().unwrap_or_else(PoisonError::into_inner), Shelf::new());
+    drop((floats, planes8, planes16));
 }
 
 /// Idle buffers held and buffers handed out again so far (`perf.stats`).

@@ -95,6 +95,17 @@ compositor's savings are a larger part of the export.
 What is left in a frame without overlays is the Y'CbCr → linear float conversion of the camera
 picture (4.5 ms in the synthetic case) and the conversion to 8 bits (2 ms).
 
+### Memory after an export
+
+The recycled images stay on the shelves of `filmcraft_frame::pool` (up to 320 MiB of them, and
+192 MiB of each plane type), and nothing else asks for images of an export's size, so a finished
+export left them idle. The export pipeline now trims the pool when it goes away, however the
+export ended (done, failed, cancelled, dropped half way): `perf.stats` reads `decode.planePoolMB`
+0 afterwards. A process that exported a synthetic 3 s 1080p24 matte as PNG frames three times
+(Apple M1, `footprint`, 10 s after the last export) rested at **575 MB** with the pool holding
+332 MB idle and at **258 MB** with the trim. The memory does not come back at once: macOS returns
+freed pages over a few seconds (892 MB right after the export in both cases, 726 MB after 2 s).
+
 ## Results (GPU2: standard effects on the GPU compositor, #30, before → after)
 
 Before = this change with clips that carry standard effects sent back to the CPU layer path in
