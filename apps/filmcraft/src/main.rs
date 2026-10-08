@@ -24,6 +24,8 @@ mod args;
 mod audio;
 mod audio_in;
 mod control_server;
+#[cfg(any(target_os = "windows", test))]
+mod graphics;
 #[cfg(target_os = "macos")]
 mod native_menu;
 mod window_raise;
@@ -106,6 +108,13 @@ fn main() -> eframe::Result {
             .with_app_id(APP_ID),
         event_loop_builder: agent_event_loop(control_port.is_some()),
         ..Default::default()
+    };
+    // Before eframe creates the wgpu instance: default Windows to DirectX 12 only (see graphics.rs).
+    #[cfg(target_os = "windows")]
+    let options = {
+        let mut options = options;
+        graphics::configure(&mut options, eframe::wgpu::Backends::from_env());
+        options
     };
     let started = eframe::run_native(
         "FilmCraft",
