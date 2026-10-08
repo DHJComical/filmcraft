@@ -319,7 +319,11 @@ fn upper_single(c: char) -> char {
 
 const SMALL_CAPS_SCALE: f32 = 0.78;
 
-fn shape_item(text: &str, chars: &[(usize, char, char)], rtl: bool, face: FaceId, size: f32, style: &TextStyle) -> Vec<ShapedGlyph> {
+fn uses_vertical_form(c: char) -> bool {
+    matches!(c as u32, 0x2E80..=0x9FFF | 0xF900..=0xFAFF | 0xFE10..=0xFE1F | 0xFE30..=0xFE4F | 0xFF00..=0xFFEF | 0x20000..=0x3FFFF)
+}
+
+fn shape_item(text: &str, chars: &[(usize, char, char)], rtl: bool, face: FaceId, size: f32, style: &TextStyle, vertical: bool) -> Vec<ShapedGlyph> {
     let f = fonts::face(face);
     let (Some(font), Some(data)) = (f.font(), f.shaper_data()) else { return Vec::new() };
     let shaper = data.shaper(&font).build();
@@ -330,6 +334,10 @@ fn shape_item(text: &str, chars: &[(usize, char, char)], rtl: bool, face: FaceId
     buf.set_direction(if rtl { Direction::RightToLeft } else { Direction::LeftToRight });
     buf.guess_segment_properties();
     let mut feats = Vec::new();
+    if vertical && chars.first().is_some_and(|c| uses_vertical_form(c.1)) {
+        feats.push(Feature::new(Tag::new(b"vert"), 1, ..));
+        feats.push(Feature::new(Tag::new(b"vrt2"), 1, ..));
+    }
     if !style.kerning {
         feats.push(Feature::new(Tag::new(b"kern"), 0, ..));
     }
@@ -416,7 +424,7 @@ fn paragraph(text: &str, base: usize, sty: &Styles, para: &ParagraphStyle) -> Ve
         let st = sty.list[si];
         let sub: Vec<(usize, char, char)> = chars[i..j].iter().map(|c| (c.0, c.1, c.2)).collect();
         let size = if small { st.size * SMALL_CAPS_SCALE } else { st.size };
-        let mut glyphs = shape_item(text, &sub, rtl, face, size, st);
+        let mut glyphs = shape_item(text, &sub, rtl, face, size, st, para.vertical);
         // tracking after each cluster
         if st.tracking != 0.0 {
             let t = st.tracking * st.size / 1000.0;
@@ -713,7 +721,7 @@ fn layout_vertical(text: &str, sty: &Styles, para: &ParagraphStyle, col_w: f32, 
     let style = sty.list[0];
     let pm = fonts::face(sty.prim[0].face).metrics(style.size);
     let row = (pm.ascent + pm.descent).max(style.size * 0.5) + style.tracking * style.size / 1000.0;
-    let flat = ParagraphStyle::default();
+    let flat = ParagraphStyle { vertical: true, ..Default::default() };
     lay.vertical = true;
     let mut base = 0usize;
     let mut ncols = 0usize;
@@ -740,7 +748,16 @@ fn layout_vertical(text: &str, sty: &Styles, para: &ParagraphStyle, col_w: f32, 
             let g0 = lay.glyphs.len();
             lay.glyphs.extend(pl.glyphs.into_iter().map(|mut g| {
                 g.x += shift;
-                g.y += baseline;
+                // The alternate glyph hangs from its vertical origin. A horizontal ascent
+                // is not the top bearing of a vertical punctuation glyph (OpenType VORG/vmtx).
+                let font = fonts::face(g.face);
+                if text.get(g.cluster..).and_then(|s| s.chars().next()).is_some_and(uses_vertical_form)
+                    && let Some(origin) = font.vertical_origin(g.id, g.size)
+                {
+                    g.y += baseline - pl.ascent + origin;
+                } else {
+                    g.y += baseline;
+                }
                 g
             }));
             lay.lines.push(Line {
@@ -908,6 +925,53 @@ mod tests {
         assert!(l.glyphs.iter().all(|g| g.id != 0));
         assert!(l.glyphs[1].y > l.glyphs[0].y);
         assert!(l.glyphs[3].x < l.glyphs[0].x);
+    }
+
+    #[test]
+    fn japanese_vertical_punctuation_uses_alternates_at_the_top_right() {
+        use skrifa::{
+            MetadataProvider,
+            instance::{LocationRef, Size},
+        };
+        fonts::scan_system();
+        let face = fonts::all_faces().into_iter().find(|f| {
+            ((f.info.family.contains("Hiragino") && !f.info.family.contains(" GB") && !f.info.family.contains(" TC"))
+                || f.info.family.contains("Shippori")
+                || f.info.family.contains("BIZ UD"))
+                && "国、。「」ー".chars().all(|c| f.has_char(c))
+                && (f.has_feature(b"vert") || f.has_feature(b"vrt2"))
+        });
+        let Some(face) = face else {
+            eprintln!("SKIPPED: no Japanese font with vertical alternates available");
+            return;
+        };
+        let style = TextStyle { family: face.info.family.clone(), style: face.info.style.clone(), ..st(48.0) };
+        let text = "国、。「」ーABC";
+        let horizontal = layout_uncached(text, &style, &ParagraphStyle::default());
+        let vertical = layout_uncached(text, &style, &ParagraphStyle { vertical: true, ..Default::default() });
+        assert_eq!(vertical.glyphs.len(), 9);
+        assert_eq!(vertical.glyphs[0].id, horizontal.glyphs[0].id);
+        for i in 1..6 {
+            assert_ne!(vertical.glyphs[i].id, horizontal.glyphs[i].id, "{}: vertical form for glyph {i}", face.info.family);
+        }
+        for i in [1, 2] {
+            let g = &vertical.glyphs[i];
+            let line = &vertical.lines[i];
+            let font = fonts::face(g.face);
+            let bounds = font.font().unwrap().glyph_metrics(Size::unscaled(), LocationRef::default()).bounds(skrifa::GlyphId::new(g.id)).unwrap();
+            let scale = g.size / font.units_per_em();
+            let ink_x = g.x + (bounds.x_min + bounds.x_max) * scale / 2.0;
+            let ink_y = g.y - (bounds.y_min + bounds.y_max) * scale / 2.0;
+            let centre_x = line.x + line.width / 2.0;
+            let cell_top = line.baseline - line.ascent;
+            assert!(ink_x > centre_x, "{}: punctuation ink on the right ({ink_x}, {centre_x})", face.info.family);
+            assert!(ink_y < cell_top + g.size / 2.0, "{}: punctuation ink at the top ({ink_y}, {cell_top})", face.info.family);
+        }
+        for i in 6..9 {
+            assert_eq!(vertical.glyphs[i].id, horizontal.glyphs[i].id, "Latin shaping stays unchanged");
+        }
+        assert_eq!(layout_uncached(text, &style, &ParagraphStyle::default()), horizontal);
+        eprintln!("verified vertical punctuation with {} / {}", face.info.family, face.info.style);
     }
 
     #[test]
