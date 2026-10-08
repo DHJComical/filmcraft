@@ -124,7 +124,7 @@ impl Tokens {
             separator: Color32::from_rgb(0x30, 0x30, 0x30),
             row_alt: Color32::from_rgb(0x21, 0x21, 0x21),
             row_selected: Color32::from_rgb(0x33, 0x33, 0x33),
-            hot_text: Color32::from_rgb(0x57, 0x94, 0xec),
+            hot_text: Color32::from_rgb(0x40, 0x96, 0xf3),
             tl_bg: Color32::from_rgb(0x1d, 0x1d, 0x1d),
             tl_track_bg: Color32::from_rgb(0x1d, 0x1d, 0x1d),
             tl_track_bg_alt: Color32::from_rgb(0x1d, 0x1d, 0x1d),
@@ -139,7 +139,7 @@ impl Tokens {
             render_yellow: Color32::from_rgb(0xf0, 0xf0, 0x4f),
             render_green: Color32::from_rgb(0x2d, 0x9d, 0x78),
             monitor_bg: Color32::from_rgb(0x1d, 0x1d, 0x1d),
-            timecode: Color32::from_rgb(0x57, 0x94, 0xec),
+            timecode: Color32::from_rgb(0x40, 0x96, 0xf3),
             danger: Color32::from_rgb(0xdc, 0x51, 0x3d),
             radius: 0.0,
             radius_sm: 4.0,
@@ -227,6 +227,27 @@ impl Tokens {
     }
     pub fn semibold(size: f32) -> FontId {
         FontId::new(size, FontFamily::Name("semibold".into()))
+    }
+    /// The big blue timecode over the timeline and under the monitors: regular weight, as in
+    /// Premiere (Premiere's reads 10 px tall and 76 px wide for 00:00:16:05 at 1x).
+    pub fn timecode() -> FontId {
+        FontId::new(16.0, FontFamily::Proportional)
+    }
+}
+
+/// Menu text: Premiere's menus are the system's, larger and brighter than panel text, one item
+/// every 24 px.
+pub const MENU_TEXT_SIZE: f32 = 13.0;
+pub const MENU_TEXT: Color32 = Color32::from_rgb(0xde, 0xde, 0xde);
+
+/// Style of the menu bar's menus and their submenus (on top of egui's own menu style).
+pub fn menu_style(s: &mut egui::Style) {
+    egui::containers::menu::menu_style(s);
+    s.text_styles.insert(TextStyle::Button, FontId::new(MENU_TEXT_SIZE, FontFamily::Proportional));
+    s.text_styles.insert(TextStyle::Body, FontId::new(MENU_TEXT_SIZE, FontFamily::Proportional));
+    s.spacing.item_spacing.y = 0.0;
+    if s.visuals.dark_mode {
+        s.visuals.override_text_color = Some(MENU_TEXT);
     }
 }
 

@@ -23,13 +23,50 @@ kerning and ligatures, bidi, line breaking, all drawn as vectors in linear light
 
 | Group | Properties (parameter ids) |
 |---|---|
-| Text | `text` (Source Text), `font`, `font_style`, `size` (px), `align` (Left/Center/Right/Justify), `tracking` (1/1000 em), `kerning`, `ligatures`, `leading` (px added to the natural line height), `baseline_shift`, `faux_bold`, `faux_italic`, `caps` (Normal/All Caps/Small Caps), `underline`, `box_width` (0 = point text, else area text wrapped at that width) |
+| Text | `text` (Source Text), `font`, `font_style`, `size` (px), `align` (Left/Center/Right/Justify), `tracking` (1/1000 em), `kerning`, `ligatures`, `leading` (px added to the natural line height), `baseline_shift`, `faux_bold`, `faux_italic`, `caps` (Normal/All Caps/Small Caps), `underline`, `box_width` (0 = point text, else paragraph text wrapped at that width), `box_height` (paragraph text: lines that do not fit are not shown; 0 = as tall as the text) |
 | Shape | `shape` (Rectangle/Ellipse/Polygon/Path), `size` [w, h], `sides`, `corner_radius`, `points` (path vertices relative to the layer origin) |
 | Appearance | `fill`, `fill_color`; `stroke`, `stroke_color`, `stroke_width`, `stroke_type` (Outer/Center/Inner) and the same for `stroke2`; `background`, `background_color`, `background_opacity`, `background_size` (padding), `background_radius`; `shadow`, `shadow_color`, `shadow_opacity`, `shadow_angle` (135° = down-right), `shadow_distance`, `shadow_size`, `shadow_blur` |
 | Transform | `position` (graphic canvas px), `anchor` (layer px), `scale`, `scale_width`, `uniform_scale`, `rotation`, `opacity` |
 
 Point text's origin is its alignment point on the first baseline (the click point of the Type
-tool); a shape's origin is its centre. Colours are `#rrggbb` (sRGB).
+tool); paragraph text's origin is the top-left corner of its box; a shape's origin is its centre.
+Colours are `#rrggbb` (sRGB).
+
+### Point text and paragraph text
+
+A text layer is one of two types, as in Premiere Pro (behaviour observed in Premiere Pro 26):
+
+| | Point text | Paragraph text |
+|---|---|---|
+| Made with the Type tool by | a click | a drag: the dragged rectangle is the box |
+| Lines | only where Return was typed | wrap at the box's width; lines below the box's bottom are not shown, and the bottom-right handle turns into a red plus |
+| Selection box | fits the text | the box, whatever it holds |
+| New layer's anchor point | the origin (left end of the first baseline) | the box's top-left corner |
+| Dragging a handle | scales the layer about its anchor point: every handle scales both axes alike (Uniform Scale stays on), the font size is untouched | moves that side or corner of the box to the pointer, the opposite side stays; the text re-wraps at the same size and Scale is untouched |
+
+- **Point-text scale.** Only the pointer's travel along one side of the box counts: along its
+  width for the two side handles, along its height for the corners and the top and bottom handles.
+  Travel `d` away from the anchor scales by `1 + d / r`, where `r` is the handle's distance from
+  the anchor along that side, plus 60 points when the handle is nearer than 60 points (so a handle
+  on the anchor does not scale without bound). A handle exactly on the anchor grows the text when
+  dragged into the box.
+- **Paragraph box.** A side dragged past its opposite stops at half the font size. When the top or
+  left side moves, the layer's origin moves with the corner, so the anchor point is renumbered to
+  stay on the same spot of the picture and Position does not change.
+- **Anchor point.** Drag it with the Selection tool: the anchor moves, the layer stays (Position
+  and Anchor Point change together). It is picked before anything under it: a shape dragged by
+  its exact centre moves its anchor, not the shape, and the top-left handle of a new paragraph
+  box is reached only after moving the anchor.
+- **Switching type.** Properties ▸ Text ▸ wrench ▸ **Text Properties** ▸ Text Layer Type
+  (`graphics.setTextType`). To point text: the wrapped lines become real lines (also those the
+  box hid). To paragraph text: the box is fitted to the text. Either way the text stays where it
+  is and Position is untouched; only Anchor Point is renumbered. Vertical text is always point
+  text.
+
+Known differences from Premiere: the first line of paragraph text sits one font ascent below the
+box's top (Premiere places it higher, about one cap height below); Premiere's smallest box and
+the box it fits when switching to paragraph text were not measured exactly; the 60 points were
+measured with the Program monitor at Fit only; Text Properties has no Hindi Digits option.
 
 ## Rendering
 
@@ -45,11 +82,12 @@ Timecode and Clip Name effects also draw with the text engine.
 
 | Command | Menu / shortcut | Params |
 |---|---|---|
-| `graphics.newText` | Graphics and Titles ▸ New Layer ▸ Text (⌘T) | `text`, `position`, `clip` (add to this graphic), `vertical`, `size`, `font`, `fontStyle`, `seconds` (5), `track`, `time` |
+| `graphics.newText` | Graphics and Titles ▸ New Layer ▸ Text (⌘T) | `text`, `position`, `box` (`[w, h]`: paragraph text in a box, `position` is its top-left corner), `clip` (add to this graphic), `vertical`, `size`, `font`, `fontStyle`, `seconds` (5), `track`, `time` |
 | `graphics.newVerticalText` | New Layer ▸ Vertical Text | as `graphics.newText`; characters stack top to bottom, paragraphs are columns right to left |
 | `graphics.newRectangle`, `graphics.newEllipse`, `graphics.newPolygon` | New Layer ▸ Rectangle (⌥⌘R), Ellipse (⌥⌘E), Polygon | `position`, `size`, `clip`; polygon `sides` (6) |
 | `graphics.newFromFile` | New Layer ▸ From file… | `path` — imports the image or video and places it above the clips at the playhead (a separate clip; graphics have no media layers yet) |
 | `graphics.newShape` | (agents) | `shape` (rectangle/ellipse/polygon/path), `position`, `size`, `points`, `clip` |
+| `graphics.setTextType` | Text Properties ▸ Text Layer Type | `clip`, `layer`, `type` (`point` / `paragraph`); the text stays where it is |
 | `graphics.setText` | typing on the monitor | `clip`, `layer`, `text`, `merge` (coalesce one typing session into one undo step) |
 | `graphics.set` | Properties panel | `clip`, `layer`, `props` {parameter id or camelCase alias: value; choices by index or name}, `time` |
 | `graphics.selectLayer` | layer list / monitor click | `clip`, `layers` |
@@ -65,7 +103,7 @@ Timecode and Clip Name effects also draw with the text engine.
 | `graphics.selectNextLayer`, `graphics.selectPreviousLayer` | Select ▸ Select Next / Previous Layer (⌥⌘], ⌥⌘[) | cycles the selected layer |
 | `graphics.resetAllParameters` | Reset All Parameters | `layers` (default: the selected layers, else all) — appearance, text formatting and transform back to defaults; text, shape and geometry kept |
 | `graphics.resetDuration` | Reset Duration | `seconds` (5), limited by the next clip on the track |
-| `graphics.list` | (query) | `clip` — layers with names, kinds, text, position and on-canvas quads |
+| `graphics.list` | (query) | `clip` — layers with names, kinds, text, `textType` (point / paragraph), `box`, `overflow` (the box hides text), position, anchor, scale and on-canvas quads |
 | `fonts.list` | (query) | `system` (scan system font folders, default true) — families and styles |
 
 Without `clip`, commands use the selected graphic clip, else the topmost graphic clip under the
@@ -77,8 +115,8 @@ duration (a track is added if needed).
 
 | Tool | On the Program monitor |
 |---|---|
-| Type (T) | Click empty picture: new text layer with a caret. Click a text layer: caret there. Type; ←/→ (⌥ word, ⌘ line), ↑/↓, Home/End, Shift to select, ⌘A, ⌘C/⌘X/⌘V, Return = new line, Backspace/Delete, Esc = stop editing. Drag inside the edited text to select. |
-| Selection (V) | Click a layer to select it (box with handles and anchor point); drag to move; drag a corner handle to scale; double-click a text layer to edit it. |
+| Type (T) | Click empty picture: new point-text layer with a caret. Drag on empty picture: new paragraph-text layer with that box. Click a text layer: caret there. The box of the text being typed into is red. Type; ←/→ (⌥ word, ⌘ line), ↑/↓, Home/End, Shift to select, ⌘A, ⌘C/⌘X/⌘V, Return = new line, Backspace/Delete, Esc = stop editing. Drag inside the edited text to select. |
+| Selection (V) | Click a layer to select it (box with handles and anchor point; only selected layers have a box, and a layer whose visibility is off has none and cannot be clicked); drag to move; drag the anchor point to move it alone; drag a handle to scale point text about its anchor, resize a paragraph-text box, or stretch a shape away from its opposite side (see *Point text and paragraph text*); double-click a text layer to edit it. |
 | Rectangle / Ellipse | Drag to draw a shape layer. |
 | Pen (P) | Click to place points; click the first point (or Return) to close the path; Esc cancels. |
 
@@ -86,7 +124,9 @@ Moving a layer snaps its edges or centre to the frame edges, the frame centre an
 (View ▸ Snap in Program Monitor, on by default; hold ⌘/Ctrl to move freely). See
 [monitors.md](monitors.md) for rulers and guides.
 
-Automation ids: `program.layer.<clip>.<layer>`, `program.layer.<clip>.<layer>.handle.<n>`,
+Automation ids: `program.layer.<clip>.<layer>`, `program.layer.<clip>.<layer>.handle.<n>`
+(0–3 the corners from the top-left clockwise, 4–7 the top, right, bottom and left sides),
+`program.layer.<clip>.<layer>.anchor`,
 `program.textEdit` (while editing).
 
 ## Properties / Essential Graphics panels
@@ -95,11 +135,14 @@ With a graphic clip selected, the Properties panel (and Essential Graphics) show
 (front first; new text / rectangle / ellipse, bring forward / send backward, delete, visibility),
 **Align and Transform** (six align buttons, two distribute buttons, position, anchor, scale,
 rotation, opacity), **Text** (Source Text field, font family and style, size, paragraph alignment,
-tracking, leading, baseline shift, box width, faux bold / faux italic / all caps / small caps /
-underline, kerning and ligatures), **Shape**, and **Appearance** (fill, two strokes, background,
+tracking, leading, baseline shift, box width and height, faux bold / faux italic / all caps /
+small caps / underline, kerning and ligatures; the wrench in the section's header opens **Text
+Properties**: Text Layer Type and Ligatures), **Shape**, and **Appearance** (fill, two strokes, background,
 shadow). Automation ids: `graphics.layers.<n>`, `graphics.prop.<parameter id>`,
 `graphics.align.<how>`, `graphics.distribute.<axis>`, `graphics.sourceText`, `graphics.NewTextLayer`,
-`graphics.NewRectangle`, `graphics.NewEllipse`, `graphics.deleteLayer`, `graphics.section.<name>`.
+`graphics.NewRectangle`, `graphics.NewEllipse`, `graphics.deleteLayer`, `graphics.section.<name>`,
+`graphics.textProperties` (the wrench) and in its dialog `graphics.textProperties.type`,
+`.type.point`, `.type.paragraph`, `.ligatures`, `.ok`, `.cancel`.
 
 ## Per-character styles
 

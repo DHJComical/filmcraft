@@ -112,11 +112,22 @@ pub const HEAD_LEN: usize = 64 * 1024;
 /// Open media from a reader: reader openers first; otherwise read the whole file and use the
 /// byte openers (`extra`, then stills / WAV).
 pub fn open_reader(name: &str, reader: SharedReader, reader_openers: &[ReaderOpener], extra: &[Opener]) -> Result<SharedSource> {
+    open_reader_within(name, reader, reader_openers, extra, u64::MAX)
+}
+
+/// Like [`open_reader`], but a file no reader opener takes is read whole only up to `max_whole`
+/// bytes; a larger one is refused instead. For looking at files rather than importing them (the
+/// Media Browser's properties and thumbnails, #157): reading a multi-gigabyte AVI or WAV into
+/// memory to show its duration, or to find out it isn't supported, thrashes the disk.
+pub fn open_reader_within(name: &str, reader: SharedReader, reader_openers: &[ReaderOpener], extra: &[Opener], max_whole: u64) -> Result<SharedSource> {
     let head = read_range(&*reader, 0, HEAD_LEN).map_err(|e| MediaError::Io(format!("{name}: {e}")))?;
     for o in reader_openers {
         if let Some(r) = o(name, &head, &reader) {
             return r;
         }
+    }
+    if reader.len() > max_whole {
+        return Err(MediaError::Unsupported(format!("{name}: no streaming reader for this format, and it is too large to read whole here")));
     }
     let all = read_range(&*reader, 0, usize::try_from(reader.len()).unwrap_or(usize::MAX)).map_err(|e| MediaError::Io(format!("{name}: {e}")))?;
     crate::open_bytes(name, all.into(), extra)
@@ -156,6 +167,41 @@ mod tests {
         assert!(FileReader::open(&dir).is_err(), "a directory is not a media file");
         assert_eq!(FileReader::open(&dir.join("missing")).unwrap_err().kind(), io::ErrorKind::NotFound);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A reader that counts the bytes read from it.
+    struct Counting(MemReader, std::sync::atomic::AtomicU64);
+    impl ByteReader for Counting {
+        fn len(&self) -> u64 {
+            self.0.len()
+        }
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+            self.1.fetch_add(buf.len() as u64, std::sync::atomic::Ordering::SeqCst);
+            self.0.read_at(offset, buf)
+        }
+    }
+
+    /// #157: looking at a file no streaming reader takes (an AVI, a large WAV) read all of it.
+    /// Within a limit it reads the head only and refuses; a small file still opens.
+    #[test]
+    fn open_within_reads_only_the_head_of_large_unstreamable_files() {
+        let mut wav = crate::wav::write_wav16(&vec![0.25; 48_000 * 2], 2, 48_000);
+        let small = wav.len() as u64;
+        let r = Arc::new(Counting(MemReader(Arc::from(wav.clone())), Default::default()));
+        let src = open_reader_within("a.wav", r.clone(), &[], &[], small).unwrap();
+        assert_eq!(src.info().audio.as_ref().unwrap().channels, 2);
+        // the same file over the limit: refused after reading the sniffing head only
+        let r = Arc::new(Counting(MemReader(Arc::from(wav.clone())), Default::default()));
+        let e = open_reader_within("a.wav", r.clone(), &[], &[], small - 1).err().unwrap();
+        assert!(matches!(e, MediaError::Unsupported(_)), "{e:?}");
+        assert!(r.1.load(std::sync::atomic::Ordering::SeqCst) <= HEAD_LEN as u64);
+        // an unsupported format is refused without being read whole either
+        wav.resize(4 * HEAD_LEN, 0);
+        wav[..4].copy_from_slice(b"RIFF");
+        wav[8..12].copy_from_slice(b"AVI ");
+        let r = Arc::new(Counting(MemReader(Arc::from(wav)), Default::default()));
+        assert!(open_reader_within("a.avi", r.clone(), &[], &[], HEAD_LEN as u64).is_err());
+        assert!(r.1.load(std::sync::atomic::Ordering::SeqCst) <= HEAD_LEN as u64);
     }
 
     #[test]

@@ -476,13 +476,17 @@ fn open_in_source(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"item": item.0}))
 }
 
-/// Media properties of a file (cached per path).
+/// Media properties of a file (cached per path). Only the container's index is read; a format
+/// without a streaming reader is read whole only when small (see [`MediaPool::probe_file`]), so
+/// browsing a folder of large AVI or WAV files doesn't read all of them (#157).
+///
+/// [`MediaPool::probe_file`]: crate::media_pool::MediaPool::probe_file
 pub fn probe(s: &mut Session, path: &str) -> Option<MediaInfo> {
     if let Some(v) = s.browser.probes.get(path) {
         return v.clone();
     }
     let info = if kind_of(path).is_some_and(|k| matches!(k, "video" | "audio" | "image")) {
-        s.media.open_file(path, &*s.services).ok().map(|src| src.info().clone())
+        s.media.probe_file(path, &*s.services).ok().map(|src| src.info().clone())
     } else {
         None
     };

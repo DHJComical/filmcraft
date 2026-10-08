@@ -197,7 +197,7 @@ fn checkbox_edits_apply_on_ok_and_not_on_cancel() {
     d.click("settings.ok");
     assert!(d.draft().is_null(), "OK closes");
     assert_eq!(d.pref("trim.selectionToolRollRipple"), true, "edits on several pages apply together");
-    assert_eq!(d.pref("timeline.snapPlayhead"), true);
+    assert_eq!(d.pref("timeline.snapPlayhead"), false, "on by default (as in Premiere), the click turns it off");
 }
 
 #[test]
@@ -330,4 +330,34 @@ fn snap_playhead_and_return_to_beginning() {
     let ph = d.harness.state().session.playhead();
     d.ok("ui.playback", json!({"action": "stop"}));
     assert!(ph.0 < dur.0 / 2, "restarts from the beginning: {ph:?}");
+}
+
+/// #164: dragging the playhead in the ruler snaps to a cut, and moves freely away from one
+/// (it used to snap onto its own position and only move in jumps).
+#[test]
+fn playhead_drag_snaps_to_cuts() {
+    let mut d = Driver::demo();
+    d.frames(2);
+    let seq = d.harness.state().session.active_sequence().unwrap().clone();
+    let v1 = &seq.video_tracks[0];
+    let cut = v1.items[1].start;
+    let id = v1.items[1].id.0;
+    let rect = |d: &mut Driver, id: &str| -> [f64; 4] {
+        let v = d.ok("ui.elements", json!({"prefix": id}));
+        let e = v.as_array().unwrap().iter().find(|e| e["id"] == id).unwrap_or_else(|| panic!("no element {id}")).clone();
+        let r: Vec<f64> = e["rect"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+        [r[0], r[1], r[2], r[3]]
+    };
+    let clip = rect(&mut d, &format!("timeline.clip.{id}"));
+    let ruler = rect(&mut d, "timeline.ruler");
+    let y = ruler[1] + ruler[3] / 2.0;
+    let (from, near) = (clip[0] + 40.0, clip[0] + 3.0);
+    d.ok("ui.drag", json!({"from": {"x": from, "y": y}, "to": {"x": near, "y": y}, "steps": 8}));
+    d.frames(2);
+    assert_eq!(d.harness.state().session.playhead(), cut, "lands on the cut");
+    // a step at a time from the cut, it follows the mouse instead of sticking
+    d.ok("ui.drag", json!({"from": {"x": clip[0] + 30.0, "y": y}, "to": {"x": clip[0] + 22.0, "y": y}, "steps": 8}));
+    d.frames(2);
+    let ph = d.harness.state().session.playhead();
+    assert!(ph > cut, "moves off the cut freely: {ph:?} vs {cut:?}");
 }

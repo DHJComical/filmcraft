@@ -33,6 +33,7 @@ pub mod automation;
 pub mod brand;
 pub mod control;
 pub mod crash;
+pub mod credits;
 pub mod dock;
 pub mod frames;
 pub mod header;
@@ -111,6 +112,11 @@ pub struct HostHooks {
     pub pick_open_file: Option<Box<dyn FnMut(&str, &[&str]) -> Option<String>>>,
     /// Folder picker (Link Media search, proxy and Project Manager destinations).
     pub pick_folder: Option<Box<dyn FnMut() -> Option<String>>>,
+    /// Pick one file for a command that relinks to it (Link Media ▸ Locate…, Attach Proxies,
+    /// Reconnect Full Resolution) instead of importing it, as [`Self::pick_files`] does. Native
+    /// hosts return the path. A host whose picker is asynchronous (the web) returns `None` and
+    /// runs `hint.command` with `hint.params` plus `"path"` itself once the user has chosen.
+    pub pick_file_for_relink: Option<Box<dyn FnMut(&[&str], Option<RelinkHint>) -> Option<String>>>,
     /// Bring the window on screen for control-channel UI requests *without* taking keyboard focus
     /// (macOS: `orderFrontRegardless`). Without it the app only requests a repaint: it never
     /// activates itself for an agent, because the user's keystrokes would land here.
@@ -118,6 +124,16 @@ pub struct HostHooks {
     /// Open a file in its default application, or (`true`) reveal it in the file manager (Edit ▸
     /// Edit Original, Help ▸ Reveal Log Files).
     pub open_path: Option<Box<dyn FnMut(&str, bool) -> Result<(), String>>>,
+}
+
+/// The command a [`HostHooks::pick_file_for_relink`] caller runs with the chosen file, for hosts
+/// that can only run it later.
+#[derive(Clone, Debug)]
+pub struct RelinkHint {
+    /// `media.relink`, `media.attachProxies` or `media.reconnectFullRes`.
+    pub command: String,
+    /// Its parameters, without `"path"`.
+    pub params: serde_json::Value,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +165,9 @@ pub struct Playback {
     anchor_tick: Tick,
     /// Audio frames played at anchor (when the audio clock drives).
     pub audio_clock: bool,
+    /// The audio clock's last reading and when (egui time, s) it last moved: a device that stops
+    /// consuming samples hands the clock back to the wall clock (see [`AUDIO_STALL_S`]).
+    audio_seen: (u64, f64),
     /// Audio underruns for the current (or last) play (desktop: sound is mixed ahead).
     #[cfg(not(target_arch = "wasm32"))]
     pub audio_stats: std::sync::Arc<play_ahead::AudioStats>,
@@ -163,6 +182,12 @@ pub struct Playback {
     /// Forward playback stops here (Play In to Out, Play from Playhead to Out Point).
     pub stop_at: Option<Tick>,
 }
+
+/// How long (s) the audio clock may stand still during playback before the wall clock takes over.
+/// An output stream can open and then never call back (ALSA with a busy or misconfigured device,
+/// #136); playback must not freeze on it. Devices that are slow to start (Bluetooth) stay well
+/// under this.
+pub const AUDIO_STALL_S: f64 = 1.0;
 
 /// How long `ui.screenshot` waits for the window to present the frame.
 const SCREENSHOT_TIMEOUT_S: f64 = 10.0;
@@ -492,13 +517,18 @@ impl FilmcraftApp {
         self.frames.set_cache_budget(p.memory.frame_cache_mb as usize * (1 << 20));
         self.ui.play_after_render = p.timeline.play_after_rendering;
         if prev.as_ref().is_none_or(|q| q.audio_hardware != p.audio_hardware) {
+            if let Some(input) = self.session.voiceover.input.as_mut() {
+                input.configure_host(&p.audio_hardware.device_class);
+            }
             let rate = self.session.active_sequence().map(|q| q.settings.sample_rate);
-            let playing = self.playback.playing && self.playback.audio_clock;
+            let playing = self.playback.playing && self.playback.preroll.is_none();
             if let Some(a) = self.audio.as_mut() {
                 a.stop();
                 a.configure(&p.audio_hardware, rate);
             }
             if playing {
+                self.playback.anchor_tick = self.session.playhead();
+                self.playback.anchor_time = ctx.input(|i| i.time);
                 self.start_audio();
             }
         }
@@ -705,6 +735,7 @@ impl FilmcraftApp {
         self.playback.preroll = None;
         self.playback.anchor_time = now;
         self.playback.anchor_tick = self.session.playhead();
+        self.playback.audio_seen = (0, now);
         self.start_audio();
         // Audio Track Mixer: an automation pass runs while playing forward in real time
         if (self.playback.speed - 1.0).abs() < 1e-9 && !self.session.mixrec.active() {
@@ -792,13 +823,39 @@ impl FilmcraftApp {
             self.playback.anchor_time = now;
         }
         let rate = self.session.sequence_rate();
-        let elapsed = if self.playback.audio_clock {
-            match self.audio.as_ref().and_then(|a| a.played_frames().map(|f| (f, a.sample_rate()))) {
-                Some((f, sr)) => f as f64 / sr as f64,
-                None => now - self.playback.anchor_time,
+        let reading = if self.playback.audio_clock { self.audio.as_ref().and_then(|a| a.played_frames().map(|f| (f, a.sample_rate()))) } else { None };
+        if self.playback.audio_clock && reading.is_none() {
+            // A device error relinquishes its clock immediately. Resume from the displayed
+            // frame, rather than jumping to the old wall-clock anchor after buffered playback.
+            self.playback.anchor_tick = self.session.playhead();
+            self.playback.anchor_time = now;
+            self.playback.audio_clock = false;
+            if let Some(audio) = self.audio.as_mut() {
+                audio.stop();
             }
-        } else {
-            now - self.playback.anchor_time
+            log::warn!("audio output lost its playback clock; playing without sound");
+            self.ui.status = tl!("Audio output failed: playing without sound (check Settings ▸ Audio Hardware)").into();
+        }
+        if let Some((f, sr)) = reading {
+            if f != self.playback.audio_seen.0 {
+                self.playback.audio_seen = (f, now);
+            } else if now - self.playback.audio_seen.1 >= AUDIO_STALL_S {
+                // the device stopped consuming samples: continue from where the audio got to on
+                // the wall clock, without sound
+                let played = if sr > 0 { f as f64 / sr as f64 } else { 0.0 };
+                self.playback.anchor_tick += Tick::from_seconds_f64(played * self.playback.speed);
+                self.playback.anchor_time = now;
+                self.playback.audio_clock = false;
+                if let Some(a) = self.audio.as_mut() {
+                    a.stop();
+                }
+                log::warn!("audio output stalled (no samples consumed for {AUDIO_STALL_S} s); playing without sound");
+                self.ui.status = tl!("Audio output is not responding: playing without sound (check Settings ▸ Audio Hardware)").into();
+            }
+        }
+        let elapsed = match reading {
+            Some((f, sr)) if self.playback.audio_clock && sr > 0 => f as f64 / sr as f64,
+            _ => now - self.playback.anchor_time,
         };
         let t = self.playback.anchor_tick + Tick::from_seconds_f64(elapsed * self.playback.speed);
         let seq = self.session.active_sequence();
@@ -1031,6 +1088,8 @@ impl FilmcraftApp {
         let focused = self.ui.focused.title();
         let mut fire = Vec::new();
         ctx.input_mut(|i| {
+            let modifiers = i.modifiers;
+            clipboard_events_as_keys(&mut i.events, modifiers);
             let panel = self.bindings.iter().filter(|b| b.3.as_deref() == Some(focused));
             let app_wide = self.bindings.iter().filter(|b| b.3.is_none());
             for (m, k, id, _) in panel.chain(app_wide) {
@@ -1039,7 +1098,11 @@ impl FilmcraftApp {
                 }
             }
         });
-        for id in fire {
+        for mut id in fire {
+            // Select All / Deselect All act on the Project panel's items when it has focus (#168).
+            if self.ui.focused == PanelKind::Project && matches!(id.as_str(), "edit.selectAll" | "edit.deselectAll") {
+                id = id.replacen("edit.", "project.", 1);
+            }
             // Mark In/Out in the Source monitor when it has focus.
             let params = if self.ui.focused == PanelKind::Source
                 && (matches!(id.as_str(), "markers.markIn" | "markers.markOut") || id.starts_with("markers.markSplit") || id.starts_with("markers.goToSplit"))
@@ -1268,20 +1331,27 @@ impl FilmcraftApp {
         }
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(150));
         let f = job.progress.fraction().clamp(0.0, 1.0);
+        let left = job.progress.eta().map(panels::left_text).unwrap_or_default();
         let cancel = egui::Rect::from_center_size(egui::pos2(sb.max.x - 14.0, sb.center().y), egui::vec2(14.0, 14.0));
         let bar = egui::Rect::from_min_size(egui::pos2(cancel.min.x - 128.0, sb.center().y - 3.0), egui::vec2(120.0, 6.0));
         let p = ui.painter();
         p.rect_filled(bar, 3.0, t.separator);
         p.rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * f, bar.height())), 3.0, t.accent);
         let verb = if job.label.starts_with("Rendering") { crate::i18n::t(&job.label).to_string() } else { tl!("Exporting").to_string() };
-        p.text(egui::pos2(bar.min.x - 8.0, sb.center().y), egui::Align2::RIGHT_CENTER, format!("{verb}… {:.0}%", f * 100.0), Tokens::ui(11.0), t.text_dim);
+        p.text(
+            egui::pos2(bar.min.x - 8.0, sb.center().y),
+            egui::Align2::RIGHT_CENTER,
+            format!("{verb}… {:.0}%{left}", f * 100.0),
+            Tokens::ui(11.0),
+            t.text_dim,
+        );
         let resp = ui.interact(cancel, egui::Id::new(("job-cancel", job.id)), egui::Sense::click());
         let c = if resp.hovered() { t.hot_text } else { t.text_dim };
         let k = 3.5;
         p.line_segment([cancel.center() - egui::vec2(k, k), cancel.center() + egui::vec2(k, k)], egui::Stroke::new(1.4, c));
         p.line_segment([cancel.center() + egui::vec2(-k, k), cancel.center() + egui::vec2(k, -k)], egui::Stroke::new(1.4, c));
         self.auto.add("status.job.cancel", cancel, &format!("Cancel {}", job.label));
-        self.auto.add("status.job.progress", bar, &format!("{:.0}%", f * 100.0));
+        self.auto.add("status.job.progress", bar, &format!("{:.0}%{left}", f * 100.0));
         if resp.on_hover_text(tl!("Cancel")).clicked() {
             job.progress.cancel.store(true, Ordering::Relaxed);
             self.watched_render = None;
@@ -1573,6 +1643,79 @@ pub fn playback_mix(session: &Session, seq_id: filmcraft_project::ItemId, sr: u3
     }
 }
 
+/// The windowing layer (egui-winit, and egui's web backend) reports the clipboard shortcuts as
+/// `Event::Copy` / `Event::Cut` / `Event::Paste` instead of key presses: Ctrl+C/X/V on Windows and
+/// Linux, plus Ctrl+Insert, Shift+Insert and Shift+Delete on Windows. The shortcut bindings only
+/// match key presses, so Copy, Cut, Paste, Paste Insert, Paste Attributes and (on Windows) Ripple
+/// Delete never fired from the keyboard (#199). macOS was unaffected because its native menu bar
+/// takes the key equivalents first.
+///
+/// Add the key press each event stands for, with the modifiers held, so the bindings see it. The
+/// original event stays for anything else that reads it. Only called when no text field has
+/// keyboard focus; text fields keep handling the clipboard themselves.
+fn clipboard_events_as_keys(events: &mut Vec<egui::Event>, modifiers: egui::Modifiers) {
+    use egui::{Event, Key};
+    let keys: Vec<Key> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Copy if modifiers.command => Some(Key::C),
+            Event::Copy => Some(Key::Copy),
+            Event::Cut if modifiers.command => Some(Key::X),
+            Event::Cut if modifiers.shift => Some(Key::Delete),
+            Event::Cut => Some(Key::Cut),
+            Event::Paste(_) if modifiers.command => Some(Key::V),
+            Event::Paste(_) if modifiers.shift => Some(Key::Insert),
+            Event::Paste(_) => Some(Key::Paste),
+            _ => None,
+        })
+        .collect();
+    events.extend(keys.into_iter().map(|key| Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers }));
+}
+
+#[cfg(test)]
+mod clipboard_key_tests {
+    use egui::{Event, Key, Modifiers};
+
+    fn keys(events: Vec<Event>, m: Modifiers) -> Vec<(Key, Modifiers)> {
+        let mut events = events;
+        super::clipboard_events_as_keys(&mut events, m);
+        events.into_iter().filter_map(|e| if let Event::Key { key, modifiers, pressed: true, .. } = e { Some((key, modifiers)) } else { None }).collect()
+    }
+
+    #[test]
+    fn ctrl_c_x_v_become_key_presses() {
+        let c = Modifiers::COMMAND;
+        assert_eq!(keys(vec![Event::Copy], c), vec![(Key::C, c)]);
+        assert_eq!(keys(vec![Event::Cut], c), vec![(Key::X, c)]);
+        assert_eq!(keys(vec![Event::Paste("x".into())], c), vec![(Key::V, c)]);
+    }
+
+    #[test]
+    fn extra_modifiers_are_kept() {
+        // Paste Insert (Ctrl+Shift+V) and Paste Attributes (Ctrl+Alt+V) also arrive as Paste
+        let cs = Modifiers::COMMAND | Modifiers::SHIFT;
+        assert_eq!(keys(vec![Event::Paste("x".into())], cs), vec![(Key::V, cs)]);
+        let ca = Modifiers::COMMAND | Modifiers::ALT;
+        assert_eq!(keys(vec![Event::Paste("x".into())], ca), vec![(Key::V, ca)]);
+    }
+
+    #[test]
+    fn windows_insert_and_delete_variants() {
+        // Shift+Delete (Ripple Delete) arrives as Cut on Windows; Shift+Insert as Paste
+        assert_eq!(keys(vec![Event::Cut], Modifiers::SHIFT), vec![(Key::Delete, Modifiers::SHIFT)]);
+        assert_eq!(keys(vec![Event::Paste("x".into())], Modifiers::SHIFT), vec![(Key::Insert, Modifiers::SHIFT)]);
+    }
+
+    #[test]
+    fn other_events_are_left_alone() {
+        let mut events = vec![Event::Text("a".into()), Event::Copy];
+        super::clipboard_events_as_keys(&mut events, Modifiers::COMMAND);
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events[0], Event::Text(_)));
+        assert!(matches!(events[1], Event::Copy));
+    }
+}
+
 #[cfg(test)]
 mod gpu_fallback_tests {
     use filmcraft_render::plan::{FramePlan, PlanLayer};
@@ -1589,5 +1732,83 @@ mod gpu_fallback_tests {
         assert_eq!(super::plan_side(&p), 1920);
         let p = FramePlan::Image(filmcraft_render::Image::new(800, 4000));
         assert_eq!(super::plan_side(&p), 4000);
+    }
+}
+
+#[cfg(test)]
+mod audio_recovery_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct Device {
+        ready: bool,
+        starts: Arc<AtomicUsize>,
+        reading: Option<u64>,
+    }
+
+    impl AudioOut for Device {
+        fn sample_rate(&self) -> u32 {
+            48000
+        }
+        fn channels(&self) -> usize {
+            2
+        }
+        fn configure(&mut self, hardware: &filmcraft_engine::settings::AudioHardwarePrefs, _: Option<u32>) {
+            self.ready = hardware.default_output == "available";
+        }
+        fn start(&mut self, _: Box<dyn FnMut(&mut [f32], usize) + Send>) -> Result<u32, String> {
+            self.starts.fetch_add(1, Ordering::Relaxed);
+            if self.ready { Ok(48000) } else { Err("device unavailable".into()) }
+        }
+        fn stop(&mut self) {}
+        fn played_frames(&self) -> Option<u64> {
+            self.reading
+        }
+    }
+
+    #[test]
+    fn changing_hardware_recovers_wall_clock_playback_without_rewinding() {
+        let mut session = Session::default();
+        session.execute("file.newSequence", json!({"width":16,"height":16})).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = FilmcraftApp::new(session);
+        let starts = Arc::new(AtomicUsize::new(0));
+        app.audio = Some(Box::new(Device { ready: false, starts: starts.clone(), reading: Some(0) }));
+        app.apply_prefs(&ctx);
+        app.play(1.0);
+        app.end_preroll(0.0);
+        assert!(!app.playback.audio_clock);
+        app.session.set_playhead(Tick::from_seconds_f64(2.0));
+        app.session.prefs.audio_hardware.default_output = "available".into();
+        app.apply_prefs(&ctx);
+        assert_eq!(starts.load(Ordering::Relaxed), 2);
+        assert!(app.playback.audio_clock);
+        assert_eq!(app.playback.anchor_tick, app.session.playhead());
+        app.stop();
+    }
+
+    #[test]
+    fn a_failed_device_clock_resumes_from_the_displayed_frame() {
+        let mut session = Session::default();
+        session.execute("file.openDemoProject", json!({})).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = FilmcraftApp::new(session);
+        app.audio = Some(Box::new(Device { ready: true, starts: Arc::new(AtomicUsize::new(0)), reading: None }));
+        let displayed = app.session.sequence_rate().tick_of(48);
+        app.session.set_playhead(displayed);
+        app.playback.playing = true;
+        app.playback.audio_clock = true;
+        app.playback.anchor_tick = Tick::ZERO;
+        app.playback.anchor_time = 0.0;
+        let mut output = ctx.run_ui(egui::RawInput { time: Some(10.0), ..Default::default() }, |ui| app.advance_playback(ui.ctx()));
+        output.textures_delta.clear();
+        assert!(!app.playback.audio_clock);
+        assert_eq!(app.playback.anchor_tick, displayed);
+        assert_eq!(app.session.playhead(), displayed);
+        assert!(app.ui.status.contains("Audio output failed"));
+        app.stop();
     }
 }

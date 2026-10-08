@@ -239,14 +239,18 @@ pub fn to_playhead(s: &mut Session, p: &Value) -> Result<Value> {
     let ripple = p.get("ripple").and_then(Value::as_bool).unwrap_or(true);
     let ph = s.playhead();
     let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
-    let targeted = s.targeting().targeted;
-    let tracks: Vec<TrackId> = seq
-        .video_tracks
-        .iter()
-        .chain(seq.audio_tracks.iter())
-        .filter(|t| targeted.contains(&t.id) && !t.locked && t.items.iter().any(|i| i.start < ph && ph < i.end()))
-        .map(|t| t.id)
-        .collect();
+    let under = |t: &filmcraft_project::Track, keep: &dyn Fn(ClipId) -> bool| t.items.iter().any(|i| i.start < ph && ph < i.end() && keep(i.id));
+    // Like Add Edit: selected clips under the playhead (and their linked partners) are trimmed,
+    // and only their tracks (#164); with none, the targeted tracks are.
+    let sel = crate::commands::with_links(s, &s.state.selection);
+    let selected: Vec<TrackId> =
+        seq.video_tracks.iter().chain(seq.audio_tracks.iter()).filter(|t| !t.locked && under(t, &|c| sel.contains(&c))).map(|t| t.id).collect();
+    let tracks = if selected.is_empty() {
+        let targeted = s.targeting().targeted;
+        seq.video_tracks.iter().chain(seq.audio_tracks.iter()).filter(|t| targeted.contains(&t.id) && !t.locked && under(t, &|_| true)).map(|t| t.id).collect()
+    } else {
+        selected
+    };
     if tracks.is_empty() {
         return Err(EngineError::Other("no clip under the playhead on the targeted tracks".into()));
     }

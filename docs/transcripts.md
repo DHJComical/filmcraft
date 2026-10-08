@@ -50,9 +50,13 @@ Both are **optional features**, off by default and never built for the web:
 - `download` (`speech-download` on the engine): HTTPS downloads with rustls + RustCrypto and the
   operating system's certificate verifier.
 
-Without `whisper`, `transcript.generate` fails with "speech-to-text is not available in this build";
-transcripts can still be imported with `transcript.set` and edited with every other command. Hosts
-and tests can install any recogniser in `Session::transcriber`.
+Without `whisper`, and with no recogniser installed, `transcript.generate` and Transcribe Sequence
+are disabled, with "speech-to-text is not available in this build" as the reason (`describe`,
+`command_list {"enabled_only": true}` and the menus show it); with Automatically transcribe clips
+on, `file.import` reports the same reason as a `transcription: …` entry in its `errors`.
+Without `speech-download`, `transcript.downloadModel` is disabled the same way. Transcripts can
+still be imported with `transcript.set` and edited with every other command. Hosts and tests can
+install any recogniser in `Session::transcriber`, which enables transcription in any build.
 
 ### Models
 

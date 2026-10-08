@@ -144,7 +144,7 @@ fn ripple_delete_and_conflict() {
     // audio under the gap blocks the ripple
     let b = fx.put(v1, 20, 10, 0);
     fx.put(a1, 22, 3, 0);
-    assert_eq!(ripple_delete_items(&mut fx.seq, &[b]), Err(EditError::SyncLockConflict));
+    assert_eq!(ripple_delete_items(&mut fx.seq, &[b]), Err(EditError::SyncLockConflict("A1".into())), "names the track in the way");
     assert_eq!(fx.spans(v1), vec![(0, 10), (20, 10)], "unchanged on failure");
 }
 
@@ -284,10 +284,10 @@ fn ripple_trim_group_takes_a_split_edit_along() {
     ripple_trim_group(&mut fx.seq, &[a], Edge::Out, -f(5), &mut Fx::ctx(&mut n)).unwrap();
     assert_eq!((fx.spans(v1), fx.spans(a1)), (vec![(0, 8), (8, 10)], vec![(4, 14)]), "shorter: it follows too");
     // the sound would start before the sequence does: refused, nothing changes
-    assert_eq!(ripple_trim_group(&mut fx.seq, &[a], Edge::Out, -f(5), &mut Fx::ctx(&mut n)), Err(EditError::SyncLockConflict));
+    assert!(matches!(ripple_trim_group(&mut fx.seq, &[a], Edge::Out, -f(5), &mut Fx::ctx(&mut n)), Err(EditError::SyncLockConflict(_))));
     // another clip right before the sound leaves it no room either
     fx.put(a1, 0, 4, 0);
-    assert_eq!(ripple_trim_group(&mut fx.seq, &[a], Edge::Out, -f(2), &mut Fx::ctx(&mut n)), Err(EditError::SyncLockConflict));
+    assert!(matches!(ripple_trim_group(&mut fx.seq, &[a], Edge::Out, -f(2), &mut Fx::ctx(&mut n)), Err(EditError::SyncLockConflict(_))));
     assert_eq!((fx.spans(v1), fx.spans(a1)), (vec![(0, 8), (8, 10)], vec![(0, 4), (4, 14)]), "unchanged on failure");
     // a linked clip that ends before the cut is not a split edit and stays where it is
     let early = fx.put(fx.a(1), 0, 3, 0);
@@ -592,7 +592,7 @@ fn shorter_head_into_an_l_cut_keeps_the_earlier_sound_where_it_is() {
 
     // later material on A1 moves up with the pictures; landing on the L cut's sound refuses
     let later = fx.put(a1, 15, 5, 0);
-    assert_eq!(ripple_trim_group(&mut fx.seq, &[b], Edge::In, f(3), &mut Fx::ctx(&mut n)), Err(EditError::SyncLockConflict));
+    assert!(matches!(ripple_trim_group(&mut fx.seq, &[b], Edge::In, f(3), &mut Fx::ctx(&mut n)), Err(EditError::SyncLockConflict(_))));
     assert_eq!(fx.spans(a1), vec![(0, 13), (15, 5)], "unchanged on failure");
     fx.seq.find_item_mut(later).unwrap().1.start = f(20);
     ripple_trim_group(&mut fx.seq, &[b], Edge::In, f(2), &mut Fx::ctx(&mut n)).unwrap();
@@ -605,10 +605,10 @@ fn shorter_head_into_an_l_cut_keeps_the_earlier_sound_where_it_is() {
     let b = fx.put(v1, 10, 10, 0);
     fx.put(a1, 0, 13, 0);
     let mut n = fx.next;
-    assert_eq!(ripple_trim_group(&mut fx.seq, &[b], Edge::In, f(3), &mut Fx::ctx(&mut n)), Err(EditError::SyncLockConflict));
+    assert!(matches!(ripple_trim_group(&mut fx.seq, &[b], Edge::In, f(3), &mut Fx::ctx(&mut n)), Err(EditError::SyncLockConflict(_))));
     // so does a link with no partner left
     fx.seq.track_mut(a1).unwrap().items[0].link = Some(9);
-    assert_eq!(ripple_trim_group(&mut fx.seq, &[b], Edge::In, f(3), &mut Fx::ctx(&mut n)), Err(EditError::SyncLockConflict));
+    assert!(matches!(ripple_trim_group(&mut fx.seq, &[b], Edge::In, f(3), &mut Fx::ctx(&mut n)), Err(EditError::SyncLockConflict(_))));
 
     // a linked cutaway across the cut whose own partner reaches past it too is no L cut: it refuses
     let mut fx = Fx::new();
@@ -622,7 +622,7 @@ fn shorter_head_into_an_l_cut_keeps_the_earlier_sound_where_it_is() {
         fx.seq.find_item_mut(c).unwrap().1.link = Some(7);
     }
     let mut n = fx.next;
-    assert_eq!(ripple_trim_group(&mut fx.seq, &[b], Edge::In, f(3), &mut Fx::ctx(&mut n)), Err(EditError::SyncLockConflict));
+    assert!(matches!(ripple_trim_group(&mut fx.seq, &[b], Edge::In, f(3), &mut Fx::ctx(&mut n)), Err(EditError::SyncLockConflict(_))));
 }
 
 #[test]
@@ -651,7 +651,7 @@ fn shorter_head_closes_the_stretch_after_the_cut_on_sync_locked_tracks() {
         } else {
             trim(&mut fx.seq, b, Edge::In, TrimMode::Ripple, f(2), &mut Fx::ctx(&mut n))
         };
-        assert_eq!(r, Err(EditError::SyncLockConflict), "group {group}");
+        assert!(matches!(r, Err(EditError::SyncLockConflict(_))), "group {group}");
     }
     // a clip on a sync-locked track that starts at the cut stays put while the pictures after it move
     // up: only the stretch after the cut sees it (the old stretch, before the cut, let it through)
@@ -668,7 +668,7 @@ fn shorter_head_closes_the_stretch_after_the_cut_on_sync_locked_tracks() {
         } else {
             trim(&mut fx.seq, b, Edge::In, TrimMode::Ripple, f(3), &mut Fx::ctx(&mut n))
         };
-        assert_eq!(r, Err(EditError::SyncLockConflict), "group {group}");
+        assert!(matches!(r, Err(EditError::SyncLockConflict(_))), "group {group}");
         assert_eq!(fx.spans(v1), vec![(0, 10), (10, 10), (20, 10)], "unchanged on failure");
     }
 }

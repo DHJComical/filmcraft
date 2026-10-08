@@ -33,7 +33,7 @@ pub const PREFS_VERSION: u32 = 2;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct GeneralPrefs {
-    /// Interface language (persisted independently of projects): `en`, `ja`, or `es`.
+    /// Interface language (persisted independently of projects): `en`, `ja`, `es` or `pt-br`.
     pub interface_language: String,
     /// "At Startup": `showHome` (FilmCraft: the demo project), `openMostRecent`, `emptyProject`.
     pub at_startup: String,
@@ -444,7 +444,7 @@ impl Default for TimelinePrefs {
             surround_media_tracks: "useFile".into(),
             multichannel_mono_media_tracks: "useFile".into(),
             focus_timeline_on_edit: false,
-            snap_playhead: false,
+            snap_playhead: true,
             return_to_beginning: true,
             out_of_sync_unlinked: false,
             play_after_rendering: true,
@@ -675,7 +675,12 @@ static CATEGORIES: &[Category] = &[
         id: "general",
         title: "General",
         rows: &[
-            f("general.interfaceLanguage", "Interface Language", Kind::Choice(&[("en", "English"), ("ja", "日本語"), ("es", "Español")]), true),
+            f(
+                "general.interfaceLanguage",
+                "Interface Language",
+                Kind::Choice(&[("en", "English"), ("ja", "日本語"), ("es", "Español"), ("pt-br", "Português (Brasil)")]),
+                true,
+            ),
             f("general.atStartup", "At Startup", Kind::Choice(STARTUP), true),
             f("general.whenOpeningProject", "When Opening a Project", Kind::Choice(OPENING), false),
             Row::Group(

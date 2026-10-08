@@ -16,7 +16,9 @@ pub fn ffmpeg() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("FILMCRAFT_FFMPEG") {
         return Some(PathBuf::from(p));
     }
-    ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"].iter().map(PathBuf::from).find(|p| p.exists())
+    let fixed = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"].iter().map(PathBuf::from).find(|p| p.exists());
+    // otherwise whatever `ffmpeg` / `ffmpeg.exe` is on PATH (Windows has no fixed location)
+    fixed.or_else(|| std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(format!("ffmpeg{}", std::env::consts::EXE_SUFFIX))).find(|p| p.is_file()))
 }
 
 /// A fixture: file name, lavfi video source, seconds, with audio, video encoder arguments.
@@ -32,6 +34,24 @@ const X264: &[&str] = &["-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pi
 const X265: &[&str] = &["-c:v", "libx265", "-preset", "fast", "-crf", "22", "-pix_fmt", "yuv420p", "-tag:v", "hvc1", "-x265-params", "log-level=error"];
 const VP9: &[&str] = &["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-b:v", "0", "-crf", "32", "-row-mt", "1", "-pix_fmt", "yuv420p"];
 const AV1: &[&str] = &["-c:v", "libsvtav1", "-preset", "10", "-crf", "35", "-pix_fmt", "yuv420p", "-svtav1-params", "keyint=48"];
+const X265_MAIN10: &[&str] = &[
+    "-c:v",
+    "libx265",
+    "-preset",
+    "fast",
+    "-crf",
+    "22",
+    "-profile:v",
+    "main10",
+    "-pix_fmt",
+    "yuv420p10le",
+    "-tag:v",
+    "hvc1",
+    "-x265-params",
+    "log-level=error",
+];
+/// AV1 where ffmpeg has libaom but not SVT-AV1 (the Windows builds): slower to encode, same role.
+const AV1_AOM: &[&str] = &["-c:v", "libaom-av1", "-crf", "35", "-b:v", "0", "-cpu-used", "8", "-row-mt", "1", "-g", "48", "-pix_fmt", "yuv420p"];
 const PRORES: &[&str] = &["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le", "-vendor", "apl0"];
 
 const SPECS: &[Spec] = &[
@@ -49,6 +69,7 @@ const SPECS: &[Spec] = &[
     Spec { name: "dec_h264_2160.mp4", src: "testsrc2=s=3840x2160:r=24000/1001:d=3,noise=alls=6:allf=t", secs: 3, audio: false, codec: X264 },
     Spec { name: "dec_hevc_1080.mp4", src: "testsrc2=s=1920x1080:r=24000/1001:d=5,noise=alls=6:allf=t", secs: 5, audio: false, codec: X265 },
     Spec { name: "dec_hevc_2160.mp4", src: "testsrc2=s=3840x2160:r=24000/1001:d=3,noise=alls=6:allf=t", secs: 3, audio: false, codec: X265 },
+    Spec { name: "dec_hevc10_2160.mp4", src: "testsrc2=s=3840x2160:r=24000/1001:d=3,noise=alls=6:allf=t", secs: 3, audio: false, codec: X265_MAIN10 },
     Spec { name: "dec_vp9_1080.webm", src: "testsrc2=s=1920x1080:r=24000/1001:d=5,noise=alls=6:allf=t", secs: 5, audio: false, codec: VP9 },
     Spec { name: "dec_vp9_2160.webm", src: "testsrc2=s=3840x2160:r=24000/1001:d=3,noise=alls=6:allf=t", secs: 3, audio: false, codec: VP9 },
     Spec { name: "dec_av1_1080.mp4", src: "testsrc2=s=1920x1080:r=24000/1001:d=5,noise=alls=6:allf=t", secs: 5, audio: false, codec: AV1 },
@@ -59,6 +80,11 @@ const SPECS: &[Spec] = &[
     Spec { name: "clip360.mp4", src: "testsrc2=s=640x360:r=24000/1001:d=20", secs: 20, audio: true, codec: X264 },
 ];
 
+/// Whether this ffmpeg lists `encoder`.
+fn has_encoder(ffmpeg: &Path, encoder: &str) -> bool {
+    Command::new(ffmpeg).args(["-hide_banner", "-encoders"]).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(encoder))
+}
+
 /// The fixture `name`, generating it on first use (None when ffmpeg or its encoder is missing).
 pub fn fixture(name: &str) -> Option<PathBuf> {
     let dir = fixtures_dir();
@@ -68,6 +94,7 @@ pub fn fixture(name: &str) -> Option<PathBuf> {
     }
     let ff = ffmpeg()?;
     let spec = SPECS.iter().find(|f| f.name == name)?;
+    let codec = if std::ptr::eq(spec.codec, AV1) && !has_encoder(&ff, "libsvtav1") { AV1_AOM } else { spec.codec };
     std::fs::create_dir_all(&dir).ok()?;
     eprintln!("generating {}", path.display());
     // Write under a temporary name and rename, so a concurrent run never sees half a file.
@@ -79,7 +106,7 @@ pub fn fixture(name: &str) -> Option<PathBuf> {
     if spec.audio {
         c.args(["-f", "lavfi", "-i", &format!("sine=f=440:d={}", spec.secs), "-c:a", "aac", "-shortest"]);
     }
-    c.args(spec.codec);
+    c.args(codec);
     if ext != "webm" {
         c.args(["-movflags", "+faststart"]);
     }

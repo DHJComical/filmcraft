@@ -423,11 +423,7 @@ fn can_replace_from_bin(s: &Session) -> std::result::Result<(), String> {
 
 /// The media item behind `id` (subclips resolve to their parent) and the subclip range.
 fn media_root(p: &Project, id: ItemId) -> Option<(ItemId, &MediaClip, Option<TimeRange>)> {
-    match &p.item(id)?.kind {
-        ItemKind::Media(m) => Some((id, m, None)),
-        ItemKind::Subclip { parent, range, .. } => media_root(p, *parent).map(|(i, m, _)| (i, m, Some(*range))),
-        _ => None,
-    }
+    p.resolve_media(id)
 }
 
 /// What the Source monitor shows for an item: the media-time span of its time ruler, its frame

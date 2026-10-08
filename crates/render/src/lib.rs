@@ -35,6 +35,7 @@ pub mod vfx;
 
 use std::sync::Arc;
 
+use filmcraft_frame::{PixelData, VideoFrame, pool};
 use filmcraft_geom::{Affine, Vec2};
 use filmcraft_media::{FrameRequest, SharedSource};
 use filmcraft_project::{ItemId, ItemKind, ParamValue, Project, Sequence, TrackItem};
@@ -96,19 +97,89 @@ fn render_seq(project: &Project, seq: &Sequence, t: Tick, opts: RenderOptions, s
     render_seq_tracks(project, seq, t, opts, sources, None)
 }
 
+/// The frame being composited. It stays unallocated until a layer has to be mixed into it: an
+/// opaque bottom layer simply becomes the canvas, which saves a zero-filled image (33 MB at 1080p)
+/// and the pass that mixes the layer over it.
+struct Canvas {
+    img: Option<Image>,
+    w: usize,
+    h: usize,
+}
+
+impl Canvas {
+    fn new(w: usize, h: usize) -> Self {
+        Self { img: None, w, h }
+    }
+    fn is_empty(&self) -> bool {
+        self.img.is_none()
+    }
+    /// The image, transparent black when nothing was drawn yet.
+    fn get(&mut self) -> &mut Image {
+        let (w, h) = (self.w, self.h);
+        self.img.get_or_insert_with(|| Image::new(w, h))
+    }
+    fn set(&mut self, img: Image) {
+        self.img = Some(img);
+    }
+    /// A copy of the current image.
+    fn snapshot(&self) -> Image {
+        self.img.clone().unwrap_or_else(|| Image::new(self.w, self.h))
+    }
+    fn into_image(self) -> Image {
+        let (w, h) = (self.w, self.h);
+        self.img.unwrap_or_else(|| Image::new(w, h))
+    }
+}
+
+/// What one clip adds to the frame.
+pub(crate) enum Layer {
+    /// An image the size of the output.
+    Full {
+        image: Image,
+        opacity: f32,
+        blend: Blend,
+        /// Every pixel has alpha exactly 1.
+        opaque: bool,
+    },
+    /// The only part of the layer that is not transparent: a rectangle with its top-left corner at
+    /// (`x`, `y`) of the output (the rest of the layer has alpha 0, which mixes nothing in).
+    Region { image: Image, x: usize, y: usize, opacity: f32, blend: Blend },
+}
+
+impl Layer {
+    /// The layer as an image the size of the output, with its opacity and blend mode.
+    fn into_full(self, w: usize, h: usize) -> (Image, f32, Blend) {
+        match self {
+            Layer::Full { image, opacity, blend, .. } => (image, opacity, blend),
+            Layer::Region { image, x, y, opacity, blend } => {
+                let mut full = Image::new(w, h);
+                // the part of the rectangle that lies inside the output
+                let cols = image.w.min(w.saturating_sub(x));
+                for ry in 0..image.h.min(h.saturating_sub(y)) {
+                    let (from, to) = (ry * image.w * 4, ((y + ry) * w + x) * 4);
+                    if let (Some(src), Some(dst)) = (image.px.get(from..from + cols * 4), full.px.get_mut(to..to + cols * 4)) {
+                        dst.copy_from_slice(src);
+                    }
+                }
+                (full, opacity, blend)
+            }
+        }
+    }
+}
+
 /// Render a sequence, or only its video track `only` (a multi-camera angle; drawn even when the
 /// track's output is off).
 pub(crate) fn render_seq_tracks(project: &Project, seq: &Sequence, t: Tick, opts: RenderOptions, sources: &dyn SourceProvider, only: Option<usize>) -> Image {
     let (w, h) = output_size(seq, opts.scale);
-    let mut canvas = Image::new(w, h);
+    let mut canvas = Canvas::new(w, h);
     if opts.depth > MAX_NEST_DEPTH {
-        return canvas;
+        return canvas.into_image();
     }
     let tc = format_time(t, seq.settings.frame_rate, seq.settings.drop_frame, TimeDisplay::Timecode, seq.settings.sample_rate as i64);
     for (ti, track) in seq.video_tracks.iter().enumerate() {
         // A cancelled frame job (playback moved on) stops here; its result is discarded.
         if filmcraft_media::cancel::cancelled() {
-            return canvas;
+            return canvas.into_image();
         }
         if only.is_some_and(|o| o != ti) || (!track.enabled && only.is_none()) {
             continue;
@@ -133,7 +204,7 @@ pub(crate) fn render_seq_tracks(project: &Project, seq: &Sequence, t: Tick, opts
             } else {
                 transitions::apply_scaled(&tr.effect, &la, &lb, p, opts.scale)
             };
-            blend::composite(&mut canvas, &mixed, 1.0, Blend::Normal);
+            blend::composite(canvas.get(), &mixed, 1.0, Blend::Normal);
             continue;
         }
         let Some(item) = track.item_at(t) else { continue };
@@ -148,7 +219,7 @@ pub(crate) fn render_seq_tracks(project: &Project, seq: &Sequence, t: Tick, opts
                 continue;
             }
             let mt = item.effect_time_at(t);
-            let mut adjusted = canvas.clone();
+            let mut adjusted = canvas.snapshot();
             let cx = effects::FxCtx {
                 t: mt,
                 px_scale: opts.scale,
@@ -164,7 +235,7 @@ pub(crate) fn render_seq_tracks(project: &Project, seq: &Sequence, t: Tick, opts
             }
             let (op, bl) = opacity_blend(item, mt);
             // Adjustment layer opacity (and opacity masks, in sequence pixels) mix adjusted over original.
-            let mut out = canvas.clone();
+            let mut out = canvas.snapshot();
             let mut adj = adjusted;
             adj.scale_alpha(op);
             mask::apply_opacity_masks(&mut adj, item, mt, opts.scale);
@@ -174,13 +245,27 @@ pub(crate) fn render_seq_tracks(project: &Project, seq: &Sequence, t: Tick, opts
                 mask::scale_by(&mut adj, &cov);
             }
             blend::composite(&mut out, &adj, 1.0, bl);
-            canvas = out;
+            canvas.set(out);
             continue;
         }
-        if let Some((layer, op, bl)) = item_layer(project, seq, item, t, opts, sources, &tc) {
-            blend::composite(&mut canvas, &layer, op, bl);
+        match item_layer_ex(project, seq, item, t, opts, sources, &tc, true) {
+            Some(Layer::Full { image, opacity, blend: bl, opaque }) => {
+                if canvas.is_empty() && opaque && opacity == 1.0 && bl == Blend::Normal && (image.w, image.h) == (w, h) {
+                    // mixing an opaque layer over transparent black gives the layer itself
+                    canvas.set(image);
+                } else {
+                    blend::composite(canvas.get(), &image, opacity, bl);
+                    pool::recycle_f32(image.px);
+                }
+            }
+            Some(Layer::Region { image, x, y, opacity, blend: bl }) => {
+                blend::composite_at(canvas.get(), &image, x, y, opacity, bl);
+                pool::recycle_f32(image.px);
+            }
+            None => {}
         }
     }
+    let mut canvas = canvas.into_image();
     if opts.depth == 0 && !opts.working_output {
         colorman::to_display(&mut canvas, &seq.settings.color);
     }
@@ -244,12 +329,7 @@ pub(crate) fn opacity_blend(item: &TrackItem, mt: Tick) -> (f32, Blend) {
 
 /// Size of an item's source at full resolution.
 pub fn source_size(project: &Project, item: ItemId) -> Option<(u32, u32)> {
-    match &project.item(item)?.kind {
-        ItemKind::Media(m) => m.info.video.as_ref().map(|v| (v.width, v.height)),
-        ItemKind::Sequence(s) => Some((s.settings.width, s.settings.height)),
-        ItemKind::AdjustmentLayer { width, height, .. } | ItemKind::Graphic { width, height, .. } => Some((*width, *height)),
-        ItemKind::Subclip { parent, .. } => source_size(project, *parent),
-    }
+    project.source_size(item)
 }
 
 /// The Motion transform of an item at media time `mt`, mapping full-res source pixels to
@@ -294,6 +374,31 @@ pub(crate) fn item_layer(
     tc: &str,
 ) -> Option<(Image, f32, Blend)> {
     let (w, h) = output_size(seq, opts.scale);
+    item_layer_ex(project, seq, item, t, opts, sources, tc, false).map(|l| l.into_full(w, h))
+}
+
+/// Whether a placement matrix leaves the layer exactly where it is.
+fn identity_placement(m: &Affine) -> bool {
+    (m.a - 1.0).abs() < 1e-9 && (m.d - 1.0).abs() < 1e-9 && m.b == 0.0 && m.c == 0.0 && m.e.abs() < 1e-9 && m.f.abs() < 1e-9
+}
+
+/// [`item_layer`], which may also hand back only the non-transparent rectangle of a layer
+/// (`allow_region`): for a clip of plain media (no effects, no masks, no speed blending, no colour
+/// management, placed as it is) whose frame carries an alpha plane, only the part where alpha is not
+/// zero is converted and mixed, the rest of the layer being transparent anyway; and a frame
+/// without alpha is known to be opaque.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn item_layer_ex(
+    project: &Project,
+    seq: &Sequence,
+    item: &TrackItem,
+    t: Tick,
+    opts: RenderOptions,
+    sources: &dyn SourceProvider,
+    tc: &str,
+    allow_region: bool,
+) -> Option<Layer> {
+    let (w, h) = output_size(seq, opts.scale);
     // `mt`: where effects and Motion/Opacity are evaluated (differs from the shown frame's media
     // time inside a frame hold without Hold Filters).
     let mt = item.effect_time_at(t);
@@ -309,9 +414,33 @@ pub(crate) fn item_layer(
         let mut canvas = Image::new(w, h);
         graphic_clip::render_graphic(item, mt, src_size, &m, &mut canvas);
         let (op, bl) = opacity_blend(item, mt);
-        return Some((canvas, op, bl));
+        return Some(Layer::Full { image: canvas, opacity: op, blend: bl, opaque: false });
     }
-    let mut layer = base_layer(project, seq, item, t, opts, sources, want)?;
+    // plain media: nothing but the frame itself reaches the output
+    let plain_media = matches!(pi.kind, ItemKind::Media(_) | ItemKind::Subclip { .. })
+        && !(opts.effects && item.has_standard_effects())
+        && !item.effect("opacity").is_some_and(|e| e.enabled && !e.masks.is_empty());
+    let mut fetched = None;
+    if allow_region && plain_media {
+        let (src, frame, n) = media_frame(item, t, sources, want, src_size)?;
+        let (lw, lh) = frame.decimated_size(n);
+        let px_scale = lw as f32 / src_size.0.max(1) as f32;
+        let m =
+            Affine::scale(opts.scale as f64, opts.scale as f64).then_apply(&motion).then_apply(&Affine::scale(1.0 / px_scale as f64, 1.0 / px_scale as f64));
+        if (lw, lh) == (w, h) && identity_placement(&m) && interpolation_blend(item, t, src.info().frame_rate()).is_none() {
+            let cs = colorman::source_space(project, item.item, &frame);
+            if !colorman::needs_management(&seq.settings.color, cs, &frame) {
+                let (op, bl) = opacity_blend(item, mt);
+                return Some(plain_layer(&frame, n, op, bl));
+            }
+        }
+        // anything else takes the general path below, with the frame already fetched
+        fetched = Some((src, frame, n));
+    }
+    let mut layer = match fetched {
+        Some((src, frame, n)) => media_image(project, seq, item, t, &src, &frame, n, want),
+        None => base_layer(project, seq, item, t, opts, sources, want)?,
+    };
     let px_scale = layer.w as f32 / src_size.0.max(1) as f32;
     // layer px → source px → sequence px → output px
     let m = Affine::scale(opts.scale as f64, opts.scale as f64).then_apply(&motion).then_apply(&Affine::scale(1.0 / px_scale as f64, 1.0 / px_scale as f64));
@@ -335,21 +464,51 @@ pub(crate) fn item_layer(
         }
     }
     mask::apply_opacity_masks(&mut layer, item, mt, px_scale);
-    let placed = if layer.w == w
-        && layer.h == h
-        && (m.a - 1.0).abs() < 1e-9
-        && (m.d - 1.0).abs() < 1e-9
-        && m.b == 0.0
-        && m.c == 0.0
-        && m.e.abs() < 1e-9
-        && m.f.abs() < 1e-9
-    {
-        layer
-    } else {
-        layer.transformed(w, h, &m)
-    };
+    let placed = if layer.w == w && layer.h == h && identity_placement(&m) { layer } else { layer.transformed(w, h, &m) };
     let (op, bl) = opacity_blend(item, mt);
-    Some((placed, op, bl))
+    Some(Layer::Full { image: placed, opacity: op, blend: bl, opaque: false })
+}
+
+/// The layer of a plain media frame (see [`item_layer_ex`]): only the part with alpha when the frame
+/// has an alpha plane, the whole picture otherwise (opaque when it has no alpha at all).
+fn plain_layer(frame: &VideoFrame, n: usize, opacity: f32, blend: Blend) -> Layer {
+    match frame.alpha_region(n) {
+        Some(r) => {
+            let (r, px) = frame.to_linear_f32_region(n, None, r);
+            Layer::Region { image: Image { w: r.w, h: r.h, px }, x: r.x, y: r.y, opacity, blend }
+        }
+        None => {
+            let (w, h, px) = frame.to_linear_f32_decimated(n);
+            let opaque = matches!(frame.data, PixelData::Yuv8 { alpha: None, .. } | PixelData::Yuv16 { alpha: None, .. });
+            Layer::Full { image: Image { w, h, px }, opacity, blend, opaque }
+        }
+    }
+}
+
+/// The source frame of a media clip at timeline `t` (at `want` of its size), and the decimation to
+/// convert it with.
+fn media_frame(item: &TrackItem, t: Tick, sources: &dyn SourceProvider, want: f32, src_size: (u32, u32)) -> Option<(SharedSource, Arc<VideoFrame>, usize)> {
+    let src = sources.source(item.item)?;
+    let frame = src.video_frame(FrameRequest { time: item.source_time_at(t), scale: want }).ok()?;
+    let n = decimation(frame.width as f32, src_size.0 as f32 * want);
+    Some((src, frame, n))
+}
+
+/// The linear image of a media clip's `frame`, colour managed, and blended with the next frame when
+/// the clip's speed asks for it.
+#[allow(clippy::too_many_arguments)]
+fn media_image(project: &Project, seq: &Sequence, item: &TrackItem, t: Tick, src: &SharedSource, frame: &VideoFrame, n: usize, want: f32) -> Image {
+    let img = colorman::decode(project, item.item, frame, n, &seq.settings.color);
+    match interpolation_blend(item, t, src.info().frame_rate()) {
+        Some((next_time, wgt)) => match src.video_frame(FrameRequest { time: next_time, scale: want }) {
+            Ok(f2) if f2.width == frame.width && f2.height == frame.height => {
+                let b = colorman::decode(project, item.item, &f2, n, &seq.settings.color);
+                img.lerp(&b, wgt)
+            }
+            _ => img,
+        },
+        None => img,
+    }
 }
 
 /// A track item's picture at timeline `t` before any effect (decoded, colour managed, frame
@@ -370,20 +529,8 @@ pub(crate) fn base_layer(
     let pi = project.item(item.item)?;
     Some(match &pi.kind {
         ItemKind::Media(_) | ItemKind::Subclip { .. } => {
-            let src = sources.source(item.item)?;
-            let frame = src.video_frame(FrameRequest { time: ft, scale: want }).ok()?;
-            let n = decimation(frame.width as f32, src_size.0 as f32 * want);
-            let img = colorman::decode(project, item.item, &frame, n, &seq.settings.color);
-            match interpolation_blend(item, t, src.info().frame_rate()) {
-                Some((next_time, wgt)) => match src.video_frame(FrameRequest { time: next_time, scale: want }) {
-                    Ok(f2) if f2.width == frame.width && f2.height == frame.height => {
-                        let b = colorman::decode(project, item.item, &f2, n, &seq.settings.color);
-                        img.lerp(&b, wgt)
-                    }
-                    _ => img,
-                },
-                None => img,
-            }
+            let (src, frame, n) = media_frame(item, t, sources, want, src_size)?;
+            media_image(project, seq, item, t, &src, &frame, n, want)
         }
         ItemKind::Sequence(nested) => {
             let sub = RenderOptions { scale: want, effects: opts.effects, depth: opts.depth + 1, captions: false, working_output: true };
@@ -514,3 +661,7 @@ mod nest_tests;
 #[cfg(test)]
 #[path = "preview_tests.rs"]
 mod preview_tests;
+
+#[cfg(test)]
+#[path = "region_tests.rs"]
+mod region_tests;

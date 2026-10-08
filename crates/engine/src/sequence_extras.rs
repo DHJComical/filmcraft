@@ -57,7 +57,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             &["Sequence"],
             None,
             r#"{"track":"mix"|"A1"|id?,"language":"en|auto"?,"diarize":bool?,"maxSpeakers":n?,"model":str?}"#,
-            has_audio_clips,
+            can_transcribe_sequence,
             transcribe,
         ),
         spec(
@@ -103,6 +103,13 @@ fn has_audio_clips(s: &Session) -> std::result::Result<(), String> {
     has_seq(s)?;
     let q = s.active_sequence().ok_or("no sequence is open")?;
     if q.audio_tracks.iter().any(|t| !t.items.is_empty()) { Ok(()) } else { Err("the sequence has no audio clips".into()) }
+}
+
+/// Transcribe Sequence runs `transcript.generate`: disabled like it in a build without
+/// speech-to-text (#97), and when the sequence has no sound.
+fn can_transcribe_sequence(s: &Session) -> std::result::Result<(), String> {
+    crate::transcript::can_transcribe(s)?;
+    has_audio_clips(s)
 }
 
 fn has_caption_track(s: &Session) -> std::result::Result<(), String> {

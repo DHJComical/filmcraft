@@ -389,7 +389,9 @@ impl MediaSource for Mp4Source {
         // Map the requested window to source samples (edit list offset applied: presentation = pts + edit_offset).
         let ratio = src_rate as f64 / sample_rate as f64;
         let p0 = (start as f64 * ratio).floor() as i64;
-        let s0 = p0 - self.audio_offset * src_rate as i64 / track.timescale.max(1) as i64;
+        // (in i128: a hostile edit list can make the offset large enough to overflow i64)
+        let offset = i128::from(self.audio_offset) * i128::from(src_rate) / i128::from(track.timescale.max(1));
+        let s0 = i64::try_from(i128::from(p0) - offset).unwrap_or(if offset > 0 { i64::MIN } else { i64::MAX });
         let need = (frames as f64 * ratio).ceil() as i64 + 2;
         // Samples-per-unit: the track timescale is usually the sample rate for audio.
         let unit = src_rate as f64 / track.timescale.max(1) as f64;
@@ -399,14 +401,14 @@ impl MediaSource for Mp4Source {
         let mut i = first;
         while i < track.samples.len() {
             let pk_start = (self.audio_starts[i] as f64 * unit) as i64;
-            if pk_start >= s0 + need {
+            if pk_start >= s0.saturating_add(need) {
                 break;
             }
             let pk = self.audio_packet(&mut st, i)?;
             for (c, dst) in src.iter_mut().enumerate() {
                 let Some(chan) = pk.get(c.min(pk.len().saturating_sub(1))) else { continue };
                 for (k, v) in chan.iter().enumerate() {
-                    let pos = pk_start + k as i64 - s0;
+                    let pos = pk_start.saturating_add(k as i64).saturating_sub(s0);
                     if pos >= 0 && (pos as usize) < dst.len() {
                         dst[pos as usize] = *v;
                     }
@@ -835,5 +837,31 @@ mod he_aac_tests {
         assert!((0.2..0.3).contains(&peak), "peak {peak}");
         let crossings = x.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
         assert!((995..=1005).contains(&crossings), "{crossings} Hz");
+    }
+
+    /// A hostile edit list (#66): an AAC track whose edit puts it absurdly far off, read at another
+    /// rate, scaled the offset to the source rate in i64 and overflowed. It reads as silence now.
+    #[test]
+    fn hostile_audio_edit_offset_never_overflows() {
+        use filmcraft_isobmff::Edit;
+        let rate = 32_000u32;
+        let tone: Vec<f32> = (0..rate as usize / 2).map(|i| 0.25 * (i as f32 * 0.05).sin()).collect();
+        let mut enc = filmcraft_aac::Encoder::new(filmcraft_aac::EncoderConfig::cbr(rate, 1, 64_000)).unwrap();
+        let mut aus = enc.encode(&[&tone]);
+        aus.extend(enc.flush());
+        // AOT 2 (AAC-LC), 32 kHz (index 5), mono
+        let asc = vec![0x12, 0x88];
+        for media_time in [i64::MAX, i64::MAX / 3, i64::MIN / 3] {
+            let mut mux = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mp4)).unwrap();
+            let mut cfg = TrackConfig::new(SampleEntry::aac(asc.clone(), 1, rate), rate);
+            cfg.edits = vec![Edit { segment_duration: 500, media_time, media_rate: 0x10000 }];
+            let t = mux.add_track(cfg).unwrap();
+            for au in &aus {
+                mux.write_sample(t, WriteSample { data: au, duration: 1024, composition_offset: 0, is_sync: true }).unwrap();
+            }
+            let src = super::Mp4Source::open("hostile.mp4", mux.finish().unwrap().into_inner().into()).unwrap();
+            let buf = src.audio(0, 4800, 48_000).unwrap();
+            assert!(buf.channels.iter().flatten().all(|v| v.is_finite() && v.abs() <= 1.0), "media_time {media_time}");
+        }
     }
 }

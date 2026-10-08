@@ -141,6 +141,7 @@ fn export_mode_settings_and_summary() {
         "export.section.multiplexer",
         "export.video.matchSize",
         "export.video.bitrateMode",
+        "export.video.hardwareEncoding",
         "export.video.maxQuality",
         "export.audio.sampleRate",
         "export.range",
@@ -176,6 +177,78 @@ fn export_mode_settings_and_summary() {
     assert!(d.app().ui.export.settings.effects.loudness.enabled);
     assert!(d.has("export.effects.loudness.target"));
     d.snapshot("export-mode");
+}
+
+#[test]
+fn the_status_bar_and_the_queue_show_the_time_left() {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    use filmcraft_engine::Job;
+    use filmcraft_engine::export_tools::QueueStatus;
+    let mut d = Driver::new("eta");
+    d.ok("ui.set", json!({"mode": "export"}));
+    d.frames(3);
+    d.exec(
+        "export.queue.add",
+        json!({"preset": "Waveform Audio 48 kHz 16-bit", "path": d.path("eta.wav"), "range": "custom", "startSeconds": 0.0, "endSeconds": 0.25}),
+    );
+    // a job at 25 %, doing 50 units a second: 750 left, 15 s (readings from the near future, because
+    // the app reads the real clock, which is then behind them)
+    let job = Job { id: 900, label: "Exporting".into(), progress: Default::default(), result: Default::default() };
+    job.progress.total.store(1000, Ordering::Relaxed);
+    let t0 = web_time::Instant::now() + Duration::from_secs(60);
+    for i in 0..=50u64 {
+        job.progress.done.store(i * 5, Ordering::Relaxed);
+        job.progress.eta_at(t0 + Duration::from_millis(i * 100));
+    }
+    d.app().session.jobs.push(job);
+    {
+        let item = &mut d.app().session.export_queue.items[0];
+        item.status = QueueStatus::Encoding;
+        item.job = Some(900);
+    }
+    d.frames(4);
+    // the status bar says it next to the percentage, and agents read it from the same label
+    let label = d.ok("ui.elements", json!({"prefix": "status.job.progress"}))[0]["label"].as_str().unwrap().to_string();
+    assert_eq!(label, "25% · 15 s left");
+    // the queue item has it too
+    let item = d.queue().into_iter().next().unwrap();
+    assert!((item["etaSeconds"].as_f64().unwrap() - 15.0).abs() < 0.5, "{item}");
+    assert_eq!(item["status"], "encoding");
+    d.snapshot("export-eta");
+}
+
+#[test]
+fn h265_shows_the_h264_family_controls_without_the_h264_only_ones() {
+    use filmcraft_engine::export::{ExportSettings, Format};
+    let mut d = Driver::new("h265");
+    d.ok("ui.set", json!({"mode": "export"}));
+    d.frames(4);
+    // H.264, the default: profile, level and the hardware checkbox
+    for id in ["export.video.profile", "export.video.level", "export.video.hardwareEncoding", "export.video.bitrateMode"] {
+        assert!(d.has(id), "H.264: {id}");
+    }
+    d.app().ui.export.settings = ExportSettings { format: Format::Hevc, ..Default::default() };
+    d.frames(4);
+    for id in [
+        "export.video.bitrateMode",
+        "export.video.target",
+        "export.video.max",
+        "export.video.keyframeOn",
+        "export.section.multiplexer",
+        "export.section.audio",
+        "export.audio.sampleRate",
+    ] {
+        assert!(d.has(id), "H.265: {id}");
+    }
+    // Main is its only profile, the level is the encoder's choice, and hardware is the only encoder
+    for id in ["export.video.profile", "export.video.level", "export.video.hardwareEncoding"] {
+        assert!(!d.has(id), "H.265 has no {id}");
+    }
+    let sum = d.ok("ui.elements", json!({"prefix": "export.summary"}))[0]["label"].as_str().unwrap().to_string();
+    assert!(sum.contains("HEVC Main") && sum.contains("Target 20.00 Mbps"), "{sum}");
+    d.snapshot("export-h265");
 }
 
 #[test]

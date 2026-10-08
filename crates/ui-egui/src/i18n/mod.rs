@@ -31,19 +31,24 @@ pub enum Language {
     En,
     Ja,
     Es,
+    /// Persisted as `pt-br` (the blanket `rename_all` would produce `ptbr`).
+    #[serde(rename = "pt-br")]
+    PtBr,
 }
 
 static JAPANESE: OnceLock<Catalog> = OnceLock::new();
 static SPANISH: OnceLock<Catalog> = OnceLock::new();
+static PORTUGUESE: OnceLock<Catalog> = OnceLock::new();
 
 impl Language {
-    pub const ALL: [Self; 3] = [Self::En, Self::Ja, Self::Es];
+    pub const ALL: [Self; 4] = [Self::En, Self::Ja, Self::Es, Self::PtBr];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::En => "English",
             Self::Ja => "日本語",
             Self::Es => "Español",
+            Self::PtBr => "Português (Brasil)",
         }
     }
 
@@ -52,15 +57,18 @@ impl Language {
             "en" => Some(Self::En),
             "ja" => Some(Self::Ja),
             "es" => Some(Self::Es),
+            "pt-br" => Some(Self::PtBr),
             _ => None,
         }
     }
 
+    /// Stable code: the `general.interfaceLanguage` preference value (`Language::parse` reads it back).
     pub fn code(self) -> &'static str {
         match self {
             Self::En => "en",
             Self::Ja => "ja",
             Self::Es => "es",
+            Self::PtBr => "pt-br",
         }
     }
 
@@ -70,6 +78,7 @@ impl Language {
             Self::En => None,
             Self::Ja => Some(JAPANESE.get_or_init(|| Catalog::parse(include_str!("ja.tsv")))),
             Self::Es => Some(SPANISH.get_or_init(|| Catalog::parse(include_str!("es.tsv")))),
+            Self::PtBr => Some(PORTUGUESE.get_or_init(|| Catalog::parse(include_str!("pt-br.tsv")))),
         }
     }
 
@@ -224,7 +233,7 @@ mod tests {
 
     #[test]
     fn catalogs_are_well_formed() {
-        for (code, text) in [("es", include_str!("es.tsv")), ("ja", include_str!("ja.tsv"))] {
+        for (code, text) in [("es", include_str!("es.tsv")), ("ja", include_str!("ja.tsv")), ("pt-br", include_str!("pt-br.tsv"))] {
             let (entries, errors) = catalog::parse_entries(text);
             assert!(errors.is_empty(), "{code}: {errors:?}");
             for (i, (ctx, en, tr)) in entries.iter().enumerate() {
@@ -243,6 +252,15 @@ mod tests {
         assert_eq!(Language::Ja.tr("日本語の文書.pdf"), "日本語の文書.pdf");
         assert_eq!(Language::parse("es"), Some(Language::Es));
         assert_eq!(Language::parse("xx"), None);
+        assert_eq!(Language::PtBr.tr("File"), "Arquivo");
+        assert_eq!(Language::PtBr.tr("meu video.mp4"), "meu video.mp4");
+        assert_eq!(Language::PtBr.name(), "Português (Brasil)");
+        for l in Language::ALL {
+            assert_eq!(Language::parse(l.code()), Some(l));
+            let json = serde_json::to_string(&l).unwrap();
+            assert_eq!(json, format!("\"{}\"", l.code()));
+            assert_eq!(serde_json::from_str::<Language>(&json).unwrap(), l);
+        }
         assert_eq!(fmt("{b} y {a}", &[("a", "1"), ("b", "2")]), "2 y 1");
         assert_eq!(fmt("{a} {zz}", &[("a", "1")]), "1 {zz}");
     }
@@ -294,6 +312,21 @@ mod tests {
         }
         missing.sort();
         assert!(missing.is_empty(), "untranslated menu labels: {missing:#?}");
+    }
+
+    /// The Brazilian Portuguese catalog covers the menus; every entry must still be a menu label
+    /// (a renamed command would otherwise leave a dead entry and an untranslated menu item).
+    #[test]
+    fn portuguese_entries_are_menu_labels() {
+        let app = crate::FilmcraftApp::new(filmcraft_engine::Session::default());
+        let items = crate::menus::menu_items(&app);
+        let known = |text: &str| crate::menus::MENUS.contains(&text) || items.iter().any(|it| it.label == text || it.path.iter().any(|p| p == text));
+        let (entries, _) = catalog::parse_entries(include_str!("pt-br.tsv"));
+        assert!(!entries.is_empty());
+        for (_, en, _) in entries {
+            assert!(known(&en), "not a menu label: {en}");
+        }
+        assert_eq!(Language::PtBr.tr("File"), "Arquivo");
     }
 
     /// Every `tl!`/`tlf!` literal outside test modules has a Spanish translation.
@@ -476,6 +509,9 @@ mod tests {
         [sc::Targets::Percent75, sc::Targets::Percent100].iter().for_each(|k| push(&mut out, k.label()));
         crate::state::PlaybackRes::ALL.iter().for_each(|r| push(&mut out, r.label()));
         crate::state::Tool::ALL.iter().for_each(|t| push(&mut out, t.label()));
+        crate::credits::NameMode::ALL.iter().for_each(|m| push(&mut out, m.label()));
+        crate::credits::SortKey::ALL.iter().for_each(|k| push(&mut out, k.label().0));
+        filmcraft_project::TimeInterpolation::ALL.iter().for_each(|m| push(&mut out, m.label()));
         filmcraft_project::CaptionFormat::ALL.iter().for_each(|f| push(&mut out, f.label()));
         filmcraft_project::MaskMode::ALL.iter().for_each(|m| push(&mut out, m.label()));
         use filmcraft_project::essential as es;
@@ -571,6 +607,10 @@ mod tests {
         restarted.prefs = serde_json::from_str(&prefs).unwrap();
         assert_eq!(crate::FilmcraftApp::new(restarted).ui.language, Language::Es);
         assert!(crate::menus::menu_items(&app).iter().any(|it| it.id == "app.language.spanish" && it.checked == Some(true)));
+        crate::menus::invoke(&mut app, &ctx, "app.language.portuguese", serde_json::json!({})).unwrap();
+        assert_eq!(app.ui.language, Language::PtBr);
+        assert_eq!(app.session.prefs.general.interface_language, "pt-br");
+        assert!(crate::menus::menu_items(&app).iter().any(|it| it.id == "app.language.portuguese" && it.checked == Some(true)));
         crate::menus::invoke(&mut app, &ctx, "app.language.english", serde_json::json!({})).unwrap();
         assert_eq!(app.ui.language, Language::En);
         set_current(Language::En);

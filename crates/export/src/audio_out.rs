@@ -157,8 +157,17 @@ pub(crate) fn interleave(planar: &[Vec<f32>]) -> Vec<f32> {
     let mut out = Vec::with_capacity(n * planar.len());
     for i in 0..n {
         for c in planar {
-            out.push(c[i]);
+            out.push(c.get(i).copied().unwrap_or(0.0));
         }
     }
     out
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    #[test]
+    fn ragged_audio_planes_keep_channel_positions_without_panicking() {
+        assert_eq!(super::interleave(&[vec![1.0, 2.0], vec![3.0]]), vec![1.0, 3.0, 2.0, 0.0]);
+        assert!(super::interleave(&[]).is_empty());
+    }
 }

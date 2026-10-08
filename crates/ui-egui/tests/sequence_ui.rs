@@ -372,3 +372,50 @@ fn later_clips_keep_the_zoom_once_the_sequence_has_content() {
     let (x_in, x_out) = clip_span(&mut d, clip);
     assert!(((x_out - x_in) - (secs * 300.0 - 4.0)).abs() < 2.0, "zoom changed: {} px for {secs} s at 300 px/s", x_out - x_in);
 }
+
+impl Driver {
+    /// A clipboard shortcut as Windows and Linux deliver it: egui-winit sends Ctrl+C/X/V as
+    /// `Event::Copy`/`Cut`/`Paste`, not as a key press (#199).
+    fn clipboard_shortcut(&mut self, ev: egui::Event, modifiers: egui::Modifiers) {
+        self.harness.input_mut().events.extend([egui::Event::ModifiersChanged(modifiers), ev]);
+        self.frames(1);
+        self.harness.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+        self.frames(2);
+    }
+
+    /// Names of every clip in the active sequence's video tracks.
+    fn video_clip_names(&mut self) -> Vec<String> {
+        let q = self.app().session.active_sequence().unwrap();
+        q.video_tracks.iter().flat_map(|t| t.items.iter().map(|i| i.name.clone())).collect()
+    }
+}
+
+#[test]
+fn ctrl_c_and_ctrl_v_copy_and_paste_clips() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"focused": "Timeline"}));
+    let q = d.app().session.active_sequence().unwrap().clone();
+    let first = q.video_tracks[0].items[0].clone();
+    let end = q.video_tracks.iter().chain(&q.audio_tracks).flat_map(|t| t.items.iter().map(|i| i.end())).max().unwrap();
+    let copies = |d: &mut Driver| d.video_clip_names().iter().filter(|n| **n == first.name).count();
+    let before = copies(&mut d);
+    d.exec("timeline.select", json!({"clips": [first.id.0]}));
+
+    d.clipboard_shortcut(egui::Event::Copy, egui::Modifiers::COMMAND);
+    assert!(!d.app().session.state.clipboard.is_empty(), "Ctrl+C copies the selected clip");
+
+    d.exec("playhead.set", json!({"time": end.0}));
+    d.clipboard_shortcut(egui::Event::Paste(first.name.clone()), egui::Modifiers::COMMAND);
+    assert_eq!(copies(&mut d), before + 1, "Ctrl+V pastes it at the playhead");
+}
+
+#[test]
+fn ctrl_x_cuts_clips() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"focused": "Timeline"}));
+    let first = d.app().session.active_sequence().unwrap().video_tracks[0].items[0].clone();
+    d.exec("timeline.select", json!({"clips": [first.id.0]}));
+    d.clipboard_shortcut(egui::Event::Cut, egui::Modifiers::COMMAND);
+    assert!(!d.app().session.state.clipboard.is_empty());
+    assert!(d.app().session.active_sequence().unwrap().find_item(first.id).is_none(), "the cut clip leaves the timeline");
+}

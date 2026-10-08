@@ -29,6 +29,7 @@ const DECODE: &[(&str, &str, &str)] = &[
     ("dec_h264_2160.mp4", "H.264", "2160p"),
     ("dec_hevc_1080.mp4", "HEVC", "1080p"),
     ("dec_hevc_2160.mp4", "HEVC", "2160p"),
+    ("dec_hevc10_2160.mp4", "HEVC Main 10", "2160p"),
     ("dec_vp9_1080.webm", "VP9", "1080p"),
     ("dec_vp9_2160.webm", "VP9", "2160p"),
     ("dec_av1_1080.mp4", "AV1", "1080p"),
@@ -52,6 +53,7 @@ pub fn decode(o: &Opts) -> Vec<Value> {
         let mut first = Vec::new();
         let mut frames = 0;
         let mut rate = FrameRate::FPS_23_976;
+        let hw0 = filmcraft_codecs::hw::hw_stats();
         for _ in 0..o.repeat {
             let src = match filmcraft_codecs::open_bytes(name, bytes.clone()) {
                 Ok(s) => s,
@@ -82,12 +84,16 @@ pub fn decode(o: &Opts) -> Vec<Value> {
             continue;
         }
         let best = fps.iter().cloned().fold(0.0, f64::max);
+        let hw = filmcraft_codecs::hw::hw_stats();
         let row = json!({
             "fixture": name, "codec": codec, "size": size, "frames": frames,
             "fps": best, "fps_min": fps.iter().cloned().fold(f64::MAX, f64::min), "fps_runs": fps,
             "cpu_ms_per_frame": median(&cpu), "first_frame_ms": median(&first), "realtime": best / rate.as_f64(),
             "decode_threads": rayon::current_num_threads(), "load": load_avg(),
-            "hw_frames": filmcraft_codecs::hw::hw_stats().frames,
+            // OS hardware decoder activity during this row: pictures, decoders created, mid-stream
+            // fallbacks, streams handed to software (all zero with --hw off)
+            "hw_frames": hw.frames - hw0.frames, "hw_sessions": hw.sessions - hw0.sessions,
+            "hw_fallbacks": hw.fallbacks - hw0.fallbacks, "hw_declined": hw.declined - hw0.declined,
         });
         eprintln!("decode {name}: {best:.1} fps");
         rows.push(row);
@@ -191,6 +197,7 @@ pub fn playback(o: &Opts) -> Vec<Value> {
             bench.draft = draft;
             let mut display = Display::new(o.gpu);
             let path = if display.gpu_available() { "gpu" } else { "cpu" };
+            let hw0 = filmcraft_codecs::hw::hw_stats();
             let r = bench.play(&s, seq, &mut display, scale, Tick::ZERO, &format!("{scenario} {res} #{}", rep + 1));
             let mut v = playback::to_json(&r, scenario, res, path);
             let frames = (r.shown + r.dropped).max(1) as f64;
@@ -200,6 +207,11 @@ pub fn playback(o: &Opts) -> Vec<Value> {
             v["seeks"] = json!(r.gop.seeks);
             v["skipped"] = json!(r.gop.skipped);
             v["draft_frames"] = json!(r.gop.draft);
+            // OS hardware decoder activity during the run (zero with --hw off)
+            let hw = filmcraft_codecs::hw::hw_stats();
+            v["hw_frames"] = json!(hw.frames - hw0.frames);
+            v["hw_sessions"] = json!(hw.sessions - hw0.sessions);
+            v["hw_fallbacks"] = json!(hw.fallbacks - hw0.fallbacks);
             v["load"] = json!(r.load);
             v["cores_needed"] = json!(r.process_cpu / frames * fps / 1000.0);
             eprintln!("playback {scenario} {res}: {}/{} shown/dropped (load {})", r.shown, r.dropped, r.load);
@@ -430,6 +442,7 @@ pub fn export(o: &Opts) -> Vec<Value> {
         let mut cpu = Vec::new();
         let mut bytes = 0u64;
         let mut frames = 0i64;
+        let hw0 = filmcraft_engine::export::hw_encode_stats();
         for _ in 0..o.repeat {
             let mut s = Session::default();
             let a = playback::import(&mut s, &path);
@@ -447,7 +460,9 @@ pub fn export(o: &Opts) -> Vec<Value> {
             frames = s.project.sequence(seq).map(|q| q.settings.frame_rate.frame_at(q.duration())).unwrap_or(0);
             let out = dir.join(format!("out.{ext}"));
             let (t0, c0) = (Instant::now(), cpu_now());
-            let r = s.execute("file.exportMedia", json!({"path": out.to_string_lossy(), "format": format, "wait": true}));
+            // `--hw auto`: the hardware encoder too (NVENC H.264 on Windows); `--hw off`: ours
+            let hardware = if o.hw == "off" { "off" } else { "auto" };
+            let r = s.execute("file.exportMedia", json!({"path": out.to_string_lossy(), "format": format, "hardwareEncoding": hardware, "wait": true}));
             let dt = t0.elapsed().as_secs_f64();
             if let Err(e) = r {
                 eprintln!("export {format}: {e}");
@@ -470,6 +485,8 @@ pub fn export(o: &Opts) -> Vec<Value> {
             "format": label, "frames": frames, "seconds": best, "fps": frames as f64 / best,
             "realtime": frames as f64 / best / FrameRate::FPS_23_976.as_f64(), "cpu_ms_per_frame": median(&cpu),
             "mbytes": bytes as f64 / 1e6, "runs_s": runs, "load": load_avg(),
+            // pictures encoded by a hardware encoder during this row (zero with --hw off or where there is none)
+            "hw_frames": filmcraft_engine::export::hw_encode_stats().frames.saturating_sub(hw0.frames),
         }));
     }
     let _ = std::fs::remove_dir_all(&dir);

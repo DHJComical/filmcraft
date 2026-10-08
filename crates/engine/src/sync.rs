@@ -15,7 +15,7 @@
 //! `offset` (frames) shifts every clip but the reference by that much (a known delay to correct).
 
 use filmcraft_audio_dsp::sync::{SyncOptions, SyncResult, find_offset, mixdown};
-use filmcraft_project::{ItemId, ItemKind, Project, TrackItem};
+use filmcraft_project::{ItemId, Project, TrackItem};
 use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, TimeRange};
 use serde_json::{Value, json};
 
@@ -76,12 +76,7 @@ pub struct SyncClip {
 
 /// The media item behind an item (subclips resolve to their parent) and its subclip range.
 fn media_of(p: &Project, item: ItemId) -> Option<(ItemId, &filmcraft_project::MediaClip, Option<TimeRange>)> {
-    let it = p.item(item)?;
-    match &it.kind {
-        ItemKind::Media(m) => Some((item, m, None)),
-        ItemKind::Subclip { parent, range, .. } => media_of(p, *parent).map(|(i, m, _)| (i, m, Some(*range))),
-        _ => None,
-    }
+    p.resolve_media(item)
 }
 
 fn start_timecode(m: &filmcraft_project::MediaClip) -> Tick {

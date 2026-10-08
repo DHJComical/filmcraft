@@ -248,3 +248,31 @@ fn path_helpers() {
     assert_eq!(media_browser::parent("C:\\Media"), Some("C:\\".into()));
     assert_eq!(media_browser::base_name("/home/me/Movies/"), "Movies");
 }
+
+/// #157: browsing a folder read every file no streaming reader takes (an AVI, a WAV) whole into
+/// memory, just to show its properties or to find out it isn't supported. Large ones are now
+/// refused after the head; small ones still show their properties; MP4 is read through its index.
+#[cfg(any(unix, windows))]
+#[test]
+fn probing_large_unstreamable_files_does_not_read_them_whole() {
+    let dir = crate::media_test_util::tmp_dir("browser-probe-large");
+    // a 100 MB "AVI" (sparse: nothing is written past the header)
+    let avi = dir.join("camera.avi");
+    let mut head = vec![0u8; 64];
+    head[..4].copy_from_slice(b"RIFF");
+    head[8..12].copy_from_slice(b"AVI ");
+    std::fs::write(&avi, &head).unwrap();
+    std::fs::OpenOptions::new().write(true).open(&avi).unwrap().set_len(crate::media_pool::PROBE_WHOLE_FILE_MAX + 36 * 1024 * 1024).unwrap();
+    let wav = dir.join("voice.wav");
+    std::fs::write(&wav, filmcraft_media::wav::write_wav16(&[0.1; 9_600], 2, 48_000)).unwrap();
+    let mov = dir.join("clip.mov");
+    crate::media_test_util::make_movie(&mov, filmcraft_media::DemoScene::OceanSunset, 64, 36, 24);
+    let mut s = Session::default();
+    assert!(media_browser::probe(&mut s, &avi.to_string_lossy()).is_none());
+    assert_eq!(media_browser::probe(&mut s, &wav.to_string_lossy()).unwrap().audio.unwrap().channels, 2);
+    assert!(media_browser::probe(&mut s, &mov.to_string_lossy()).unwrap().video.is_some());
+    // importing is unchanged: it still opens files through the full path
+    let r = s.execute("file.import", json!({"paths": [wav.to_string_lossy()]})).unwrap();
+    assert_eq!(r["items"].as_array().unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}

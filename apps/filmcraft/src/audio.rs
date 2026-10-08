@@ -2,7 +2,7 @@
 //! ("Device Class"), the output device, the I/O buffer size and the sample rate.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use filmcraft_engine::settings::AudioHardwarePrefs;
@@ -11,6 +11,7 @@ use filmcraft_ui_egui::{AudioDevices, AudioOut};
 pub struct CpalOut {
     stream: Option<cpal::Stream>,
     played: Arc<AtomicU64>,
+    failed: Arc<AtomicBool>,
     rate: u32,
     channels: u16,
     hw: AudioHardwarePrefs,
@@ -41,33 +42,81 @@ fn output_device(h: &cpal::Host, name: &str) -> Option<cpal::Device> {
 }
 
 impl CpalOut {
-    pub fn new() -> Option<Self> {
+    pub fn new() -> Self {
         let host = cpal::default_host();
-        let dev = host.default_output_device()?;
-        let cfg = dev.default_output_config().ok()?;
-        Some(Self {
+        let cfg = host.default_output_device().and_then(|dev| dev.default_output_config().ok());
+        Self {
             stream: None,
             played: Arc::new(AtomicU64::new(0)),
-            rate: cfg.sample_rate().0,
-            channels: cfg.channels(),
+            failed: Arc::new(AtomicBool::new(false)),
+            rate: cfg.as_ref().map_or(48_000, |c| c.sample_rate().0),
+            channels: cfg.as_ref().map_or(2, |c| c.channels()),
             hw: AudioHardwarePrefs::default(),
             document_rate: None,
-        })
+        }
     }
 
     /// The stream configuration the settings ask for, falling back to the device default.
     fn config(&self, dev: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
         let default = dev.default_output_config().map_err(|e| e.to_string())?;
         let want = if self.hw.force_document_rate { self.document_rate.unwrap_or(self.hw.sample_rate) } else { self.hw.sample_rate };
-        let exact = dev.supported_output_configs().ok().and_then(|mut it| {
-            it.find(|c| {
-                c.sample_format() == cpal::SampleFormat::F32
-                    && c.channels() == default.channels()
-                    && (c.min_sample_rate().0..=c.max_sample_rate().0).contains(&want)
-            })
-            .and_then(|c| c.try_with_sample_rate(cpal::SampleRate(want)))
+        let exact = dev.supported_output_configs().ok().and_then(|it| {
+            it.filter(|c| c.channels() > 0 && (c.min_sample_rate().0..=c.max_sample_rate().0).contains(&want))
+                .max_by_key(|c| {
+                    (c.channels() == default.channels(), c.sample_format() == cpal::SampleFormat::F32, c.sample_format() == default.sample_format())
+                })
+                .and_then(|c| c.try_with_sample_rate(cpal::SampleRate(want)))
         });
         Ok(exact.unwrap_or(default))
+    }
+
+    fn converted_stream<T>(
+        &self,
+        dev: &cpal::Device,
+        config: &cpal::StreamConfig,
+        mut fill: Box<dyn FnMut(&mut [f32], usize) + Send>,
+    ) -> Result<cpal::Stream, cpal::BuildStreamError>
+    where
+        T: cpal::SizedSample + cpal::FromSample<f32>,
+    {
+        let channels = usize::from(config.channels);
+        let played = self.played.clone();
+        let failed = self.failed.clone();
+        let error_flag = failed.clone();
+        let mut scratch = Vec::new();
+        dev.build_output_stream(
+            config,
+            move |buf: &mut [T], _| {
+                // Reuse the conversion buffer. A pathological driver buffer must not panic the audio thread.
+                if buf.len() > 1_048_576 || scratch.try_reserve(buf.len().saturating_sub(scratch.len())).is_err() {
+                    buf.fill(T::EQUILIBRIUM);
+                    if !failed.swap(true, Ordering::SeqCst) {
+                        eprintln!("filmcraft: unable to allocate the audio conversion buffer");
+                    }
+                    return;
+                }
+                scratch.resize(buf.len(), 0.0);
+                fill(&mut scratch, channels);
+                convert_samples(&scratch, buf);
+                played.fetch_add((buf.len() / channels) as u64, Ordering::SeqCst);
+            },
+            move |e| stream_error(&error_flag, e),
+            None,
+        )
+    }
+}
+
+fn stream_error(failed: &AtomicBool, e: cpal::StreamError) {
+    if !failed.swap(true, Ordering::SeqCst) {
+        eprintln!("filmcraft: audio stream error: {e}");
+    }
+}
+
+fn convert_samples<T: cpal::Sample + cpal::FromSample<f32>>(input: &[f32], output: &mut [T]) {
+    // Integer conversion represents [-1, 1). In particular I24 cannot represent +1 exactly.
+    let upper = f32::from_bits(1.0_f32.to_bits() - 1);
+    for (sample, converted) in input.iter().zip(output) {
+        *converted = T::from_sample(if sample.is_finite() { sample.clamp(-1.0, upper) } else { 0.0 });
     }
 }
 
@@ -78,6 +127,9 @@ impl AudioOut for CpalOut {
         let dev = output_device(&host, &self.hw.default_output).ok_or("no output device")?;
         let cfg = self.config(&dev)?;
         let channels = cfg.channels() as usize;
+        if channels == 0 || cfg.sample_rate().0 == 0 {
+            return Err("the output device returned an invalid channel count or sample rate".into());
+        }
         let mut config: cpal::StreamConfig = cfg.clone().into();
         if let cpal::SupportedBufferSize::Range { min, max } = cfg.buffer_size()
             && (*min..=*max).contains(&self.hw.buffer_size)
@@ -87,8 +139,9 @@ impl AudioOut for CpalOut {
         self.rate = cfg.sample_rate().0;
         self.channels = cfg.channels();
         self.played.store(0, Ordering::SeqCst);
+        self.failed.store(false, Ordering::SeqCst);
         let played = self.played.clone();
-        let err = |e| eprintln!("filmcraft: audio stream error: {e}");
+        let failed = self.failed.clone();
         let stream = match cfg.sample_format() {
             cpal::SampleFormat::F32 => dev.build_output_stream(
                 &config,
@@ -96,9 +149,19 @@ impl AudioOut for CpalOut {
                     fill(buf, channels);
                     played.fetch_add((buf.len() / channels) as u64, Ordering::SeqCst);
                 },
-                err,
+                move |e| stream_error(&failed, e),
                 None,
             ),
+            cpal::SampleFormat::I8 => self.converted_stream::<i8>(&dev, &config, fill),
+            cpal::SampleFormat::I16 => self.converted_stream::<i16>(&dev, &config, fill),
+            cpal::SampleFormat::I24 => self.converted_stream::<cpal::I24>(&dev, &config, fill),
+            cpal::SampleFormat::I32 => self.converted_stream::<i32>(&dev, &config, fill),
+            cpal::SampleFormat::I64 => self.converted_stream::<i64>(&dev, &config, fill),
+            cpal::SampleFormat::U8 => self.converted_stream::<u8>(&dev, &config, fill),
+            cpal::SampleFormat::U16 => self.converted_stream::<u16>(&dev, &config, fill),
+            cpal::SampleFormat::U32 => self.converted_stream::<u32>(&dev, &config, fill),
+            cpal::SampleFormat::U64 => self.converted_stream::<u64>(&dev, &config, fill),
+            cpal::SampleFormat::F64 => self.converted_stream::<f64>(&dev, &config, fill),
             other => return Err(format!("unsupported sample format {other:?}")),
         }
         .map_err(|e| e.to_string())?;
@@ -116,7 +179,7 @@ impl AudioOut for CpalOut {
         self.channels as usize
     }
     fn played_frames(&self) -> Option<u64> {
-        self.stream.as_ref().map(|_| self.played.load(Ordering::SeqCst))
+        self.stream.as_ref().filter(|_| !self.failed.load(Ordering::SeqCst)).map(|_| self.played.load(Ordering::SeqCst))
     }
     fn devices(&self) -> AudioDevices {
         let h = host(&self.hw.device_class);
@@ -136,5 +199,37 @@ impl AudioOut for CpalOut {
             self.rate = cfg.sample_rate().0;
             self.channels = cfg.channels();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cpal::Sample;
+
+    #[test]
+    fn integer_conversion_clips_and_preserves_interleaved_channels() {
+        let mut signed = [0_i16; 8];
+        convert_samples(&[-2.0, 2.0, -0.5, 0.5, 0.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY], &mut signed);
+        assert_eq!(signed, [i16::MIN, i16::MAX, -16_384, 16_384, 0, 0, 0, 0]);
+        let mut unsigned = [0_u16; 3];
+        convert_samples(&[-1.0, 0.0, 1.0], &mut unsigned);
+        assert_eq!(unsigned, [0, 32_768, u16::MAX]);
+    }
+
+    #[test]
+    fn full_scale_24_bit_samples_remain_representable() {
+        let mut samples = [cpal::I24::EQUILIBRIUM; 3];
+        convert_samples(&[-1.0, 0.0, 1.0], &mut samples);
+        assert_eq!(samples.map(|s| s.inner()), [-8_388_608, 0, 8_388_607]);
+    }
+
+    #[test]
+    fn failed_stream_relinquishes_the_playback_clock() {
+        let failed = AtomicBool::new(false);
+        stream_error(&failed, cpal::StreamError::DeviceNotAvailable);
+        assert!(failed.load(Ordering::SeqCst));
+        let output = CpalOut::new();
+        assert_eq!(output.played_frames(), None);
     }
 }

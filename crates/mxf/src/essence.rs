@@ -188,7 +188,7 @@ pub struct SoundInfo {
 impl SoundInfo {
     /// Bytes per sample frame of plain PCM.
     pub fn frame_bytes(&self) -> usize {
-        if self.block_align > 0 { self.block_align as usize } else { self.channels.max(1) as usize * (self.bits as usize).div_ceil(8).max(1) }
+        if self.block_align > 0 { self.block_align as usize } else { (self.channels.max(1) as usize).saturating_mul((self.bits as usize).div_ceil(8).max(1)) }
     }
 }
 
@@ -208,12 +208,16 @@ pub fn aes3_element_samples(v: &[u8]) -> usize {
 /// (bits 4-27 of the little-endian 32-bit word), first `channels` of the 8 channels.
 pub fn decode_pcm(v: &[u8], format: SoundFormat, channels: usize, bits: u32, frame_bytes: usize) -> Result<Vec<Vec<f32>>> {
     let ch = channels.max(1);
+    if ch > 256 {
+        return Err(crate::Error::Invalid("PCM channel count exceeds 256".into()));
+    }
     match format {
         SoundFormat::Pcm => {
             let bps = (bits as usize).div_ceil(8);
             if bps == 0 || bps > 4 || frame_bytes < bps * ch {
                 return Err(crate::Error::Unsupported(format!("{bits}-bit PCM with {frame_bytes}-byte frames")));
             }
+            // `frame_bytes >= bps * ch`, so the output is bounded by the bytes actually supplied.
             let n = v.len() / frame_bytes;
             let mut out = vec![Vec::with_capacity(n); ch];
             let scale = 1.0 / (1u64 << (8 * bps - 1)) as f32;
@@ -233,6 +237,11 @@ pub fn decode_pcm(v: &[u8], format: SoundFormat, channels: usize, bits: u32, fra
             Ok(out)
         }
         SoundFormat::Aes3Element => {
+            // SMPTE 331M: an AES3 element carries at most eight channels (and an output buffer per
+            // declared channel would multiply a hostile header's allocation).
+            if ch > 8 {
+                return Err(crate::Error::Invalid("an AES3 element has at most eight channels".into()));
+            }
             let n = aes3_element_samples(v);
             let mut out = vec![Vec::with_capacity(n); ch];
             for i in 0..n {

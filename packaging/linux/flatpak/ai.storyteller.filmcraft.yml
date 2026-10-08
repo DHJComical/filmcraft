@@ -21,10 +21,16 @@ finish-args:
   - --socket=fallback-x11
   - --socket=pulseaudio
   - --device=dri
-  # Open/Save dialogs use the file-chooser portal (rfd), and drag-and-drop uses the document
-  # portal, so broad filesystem access isn't needed. Pictures is granted for opening files by
-  # path from the command line.
-  - --filesystem=xdg-pictures
+  # A project refers to its media by absolute path (docs/project-files.md), and the document
+  # portal only exposes the file it was handed, not the media beside it: a project opened from
+  # ~/Videos found none of its clips (#107). So, as other video editors do, FilmCraft reads and
+  # writes the home directory (media, projects, exports, autosave next to the project) and the
+  # usual mount points of external drives, where footage often lives. Open/Save dialogs still go
+  # through the file-chooser portal; nothing outside these locations is granted.
+  - --filesystem=home
+  - --filesystem=/media
+  - --filesystem=/run/media
+  - --filesystem=/mnt
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
 modules:

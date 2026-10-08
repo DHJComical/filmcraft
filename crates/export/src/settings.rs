@@ -61,6 +61,20 @@ impl H264Profile {
     }
 }
 
+/// Export ▸ Hardware encoding: whether H.264 may be encoded by the system's hardware video encoder
+/// (VideoToolbox on macOS, NVENC on NVIDIA GPUs on Windows) instead of FilmCraft's own encoder. Off
+/// by default: hardware encoders make different streams, and exports are otherwise byte-identical
+/// from run to run and machine to machine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HardwareEncoding {
+    #[default]
+    Off,
+    /// Use the hardware encoder when the system has one and it takes the settings; otherwise the
+    /// software encoder.
+    Auto,
+}
+
 /// Bitrate encoding of bitrate-driven codecs (H.264).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -368,7 +382,7 @@ impl ExportSettings {
         .max(100);
         let max = match self.bitrate_mode {
             BitrateMode::Cbr => target,
-            _ => self.max_bitrate_kbps.filter(|m| *m >= target).unwrap_or(target * 3 / 2),
+            _ => self.max_bitrate_kbps.filter(|m| *m >= target).unwrap_or_else(|| (u64::from(target) * 3 / 2).min(u64::from(u32::MAX)) as u32),
         };
         let keyint = self.keyframe_distance.filter(|k| *k > 0).unwrap_or_else(|| (fps * 2.0).round().max(1.0) as u32);
         let channels = match self.audio.channels {
@@ -392,8 +406,8 @@ impl ExportSettings {
     pub fn audio_codec(&self) -> AudioCodec {
         match (self.format, self.audio.codec) {
             (Format::Wav | Format::Aiff | Format::MxfOp1a | Format::MxfOpAtom, _) => AudioCodec::Pcm,
-            (Format::H264, _) if self.multiplexer == Multiplexer::Mp4 => AudioCodec::Aac,
-            (_, AudioCodec::Auto) if self.format == Format::H264 => AudioCodec::Aac,
+            (f, _) if f.is_h26x() && self.multiplexer == Multiplexer::Mp4 => AudioCodec::Aac,
+            (_, AudioCodec::Auto) if self.format.is_h26x() => AudioCodec::Aac,
             (_, AudioCodec::Auto) => AudioCodec::Pcm,
             (_, c) => c,
         }
@@ -411,7 +425,7 @@ impl ExportSettings {
 
     /// File extension of the output.
     pub fn extension(&self) -> &'static str {
-        if self.format == Format::H264 && self.multiplexer == Multiplexer::Mov { "mov" } else { self.format.extension() }
+        if self.format.is_h26x() && self.multiplexer == Multiplexer::Mov { "mov" } else { self.format.extension() }
     }
 
     /// Estimated output size in bytes for `duration` of a sequence (`seq_w`×`seq_h` at `seq_rate`).
@@ -421,7 +435,7 @@ impl ExportSettings {
         let fps = r.rate.num as f64 / r.rate.den as f64;
         let px = r.width as f64 * r.height as f64;
         let video_bps = match self.video_format() {
-            Format::H264 => r.target_kbps as f64 * 1000.0,
+            Format::H264 | Format::Hevc => r.target_kbps as f64 * 1000.0,
             Format::ProRes => crate::prores_profile(&self.prores_profile).nominal_mbps_1080p30() * 1e6 * px / (1920.0 * 1080.0) * fps / 29.97,
             Format::DnxHr => {
                 // nominal 1080p29.97 data rates of the DNxHR profiles (Mb/s)
@@ -494,6 +508,14 @@ impl ExportSettings {
                     };
                     v += &format!(", keyframe every {} frames", r.keyint);
                 }
+                Format::Hevc => {
+                    v += &format!(", HEVC Main (hardware encoder), {}", self.bitrate_mode.label());
+                    v += &match self.bitrate_mode {
+                        BitrateMode::Cbr => format!(", {}", mbps(r.target_kbps)),
+                        _ => format!(", Target {}, Max {}", mbps(r.target_kbps), mbps(r.max_kbps)),
+                    };
+                    v += &format!(", keyframe every {} frames", r.keyint);
+                }
                 Format::ProRes => {
                     use filmcraft_prores::Profile;
                     v += match crate::prores_profile(&self.prores_profile) {
@@ -524,8 +546,8 @@ impl ExportSettings {
             "No audio".to_string()
         };
         let container = match self.format {
-            Format::H264 if self.multiplexer == Multiplexer::Mov => "QuickTime",
-            Format::H264 => "MP4",
+            Format::H264 | Format::Hevc if self.multiplexer == Multiplexer::Mov => "QuickTime",
+            Format::H264 | Format::Hevc => "MP4",
             Format::ProRes | Format::DnxHr | Format::Apv | Format::Mjpeg => "QuickTime",
             Format::MxfOp1a | Format::MxfOpAtom => self.mxf_video_codec.label(),
             Format::PngSequence | Format::TiffSequence | Format::BmpSequence => "Image sequence",
@@ -534,6 +556,16 @@ impl ExportSettings {
         let format = if container.is_empty() { self.format.label().to_string() } else { format!("{} ({container})", self.format.label()) };
         let estimated_bytes = self.estimate_bytes(seq_w, seq_h, seq_rate, seq_sr, duration);
         Summary { format, video, audio, estimated_bytes, estimated_size: format_bytes(estimated_bytes) }
+    }
+}
+
+/// A time left, rounded up to the second: `45 s`, `2:05`, `1:02:05`.
+pub fn format_eta(d: std::time::Duration) -> String {
+    let s = d.as_secs().saturating_add(u64::from(d.subsec_nanos() > 0));
+    match s {
+        0..=59 => format!("{s} s"),
+        60..=3599 => format!("{}:{:02}", s / 60, s % 60),
+        _ => format!("{}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60),
     }
 }
 

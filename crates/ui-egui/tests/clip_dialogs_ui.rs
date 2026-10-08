@@ -239,3 +239,33 @@ fn subclip_in_the_source_monitor_and_project_menu() {
         panic!("subclip row not shown: {:?}", d.ok("ui.elements", json!({"prefix": "project.item."})));
     }
 }
+
+/// #201: the clip's right-click Speed/Duration… opens the dialog instead of applying 50%; OK
+/// applies the speed typed there, Cancel leaves the clip alone.
+#[test]
+fn speed_duration_from_the_clip_menu_opens_the_dialog() {
+    let mut d = Driver::new();
+    let c = d.v1(0);
+    d.exec("timeline.select", json!({"clips": [c.id.0]}));
+    d.ok("ui.click", json!({"id": format!("timeline.clip.{}", c.id.0), "button": "right"}));
+    d.frames(3);
+    d.click("timeline.clipMenu.clip.speedDuration");
+    assert_eq!(d.v1(0).speed, 1.0, "nothing applied yet");
+    let dlg = d.app().ui.clip_dialog.clone().expect("the dialog opened");
+    assert_eq!(dlg.command, "clip.speedDuration");
+    assert_eq!(dlg.params["speed"], json!(100.0), "starts at the clip's speed");
+    assert!(d.has("speedDuration.reverse") && d.has("speedDuration.interpolation.frameBlending"));
+    d.click("speedDuration.cancel");
+    assert!(d.app().ui.clip_dialog.is_none());
+    assert_eq!(d.v1(0).speed, 1.0, "Cancel leaves it");
+
+    d.menu("clip.speedDuration");
+    if let Some(dlg) = d.app().ui.clip_dialog.as_mut() {
+        dlg.params["speed"] = json!(200.0);
+    }
+    d.click("speedDuration.interpolation.frameBlending");
+    d.click("speedDuration.ok");
+    let got = d.v1(0);
+    assert_eq!(got.speed, 2.0);
+    assert_eq!(got.time_interpolation, filmcraft_project::TimeInterpolation::FrameBlending);
+}

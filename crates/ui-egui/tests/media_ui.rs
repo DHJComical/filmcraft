@@ -258,3 +258,51 @@ fn offline_badges_proxy_toggle_and_dialogs() {
     assert!(d.app().ui.project_manager.is_none());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// #111: Link Media ▸ Locate… relinks the selected clip to the chosen file instead of importing it,
+/// both with a host that returns the path and with one (the web) that runs the hint's command later.
+#[test]
+fn locate_relinks_instead_of_importing() {
+    let root = tmp_dir("locate");
+    let path = moved_project(&root);
+    let mut s = Session::default();
+    s.execute("file.open", json!({"path": path})).unwrap();
+    let mut d = Driver::new(s);
+    d.frames(6);
+    let items = d.app().session.project.items.len();
+    let imported = Arc::new(std::sync::Mutex::new(0));
+    let n = imported.clone();
+    d.app().hooks.pick_files = Some(Box::new(move |_| {
+        *n.lock().unwrap() += 1;
+        vec![]
+    }));
+    // an async host: nothing comes back now, the hint says what to run later
+    let hints = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let h = hints.clone();
+    d.app().hooks.pick_file_for_relink = Some(Box::new(move |_, hint| {
+        h.lock().unwrap().push(hint);
+        None
+    }));
+    d.click("linkMedia.locate");
+    let hint = hints.lock().unwrap().pop().flatten().expect("the picker got a hint");
+    assert_eq!(hint.command, "media.relink");
+    let item = hint.params["item"].as_u64().expect("the hint names the clip");
+    assert!(hint.params["match"].is_object(), "and the dialog's match options: {}", hint.params);
+    // what the web host does once the user has chosen
+    let file = root.join("Moved/Media/Harbour.mov").to_string_lossy().into_owned();
+    let mut p = hint.params.clone();
+    p["path"] = json!(file);
+    d.exec(&hint.command, p);
+    // a host that returns the path relinks the other clip from the dialog itself
+    let other = root.join("Moved/Media/Night.mov").to_string_lossy().into_owned();
+    d.app().hooks.pick_file_for_relink = Some(Box::new(move |_, _| Some(other.clone())));
+    if d.app().ui.link_media.is_some() {
+        d.click("linkMedia.locate");
+        d.frames(4);
+    }
+    assert_eq!(*imported.lock().unwrap(), 0, "Locate… never goes through the import picker");
+    assert_eq!(d.app().session.project.items.len(), items, "no new project item");
+    let st = d.exec("media.status", json!({}));
+    assert!(st.as_array().unwrap().iter().all(|m| m["status"] == "online"), "item {item}: {st}");
+    let _ = std::fs::remove_dir_all(&root);
+}

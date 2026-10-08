@@ -45,6 +45,9 @@ overrides:
       - xdg-desktop-portal
   rpm:
     depends:
+      # the same floor as the deb: built on glibc 2.35, so RHEL 9 (2.34) must refuse the install
+      # instead of installing binaries that can't start (#93)
+      - glibc >= 2.35
       - libxkbcommon
       - (vulkan-loader or libglvnd-egl)
       - alsa-lib

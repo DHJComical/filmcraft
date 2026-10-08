@@ -25,10 +25,11 @@ pub enum Tool {
     Hand,
     Zoom,
     Type,
+    VerticalType,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 16] = [
+    pub const ALL: [Tool; 17] = [
         Tool::Selection,
         Tool::TrackSelectForward,
         Tool::TrackSelectBackward,
@@ -45,6 +46,7 @@ impl Tool {
         Tool::Hand,
         Tool::Zoom,
         Tool::Type,
+        Tool::VerticalType,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -64,6 +66,7 @@ impl Tool {
             Tool::Hand => "Hand Tool",
             Tool::Zoom => "Zoom Tool",
             Tool::Type => "Type Tool",
+            Tool::VerticalType => "Vertical Type Tool",
         }
     }
     pub fn shortcut(self) -> &'static str {
@@ -83,6 +86,7 @@ impl Tool {
             Tool::Hand => "H",
             Tool::Zoom => "Z",
             Tool::Type => "T",
+            Tool::VerticalType => "",
         }
     }
     pub fn icon(self) -> Icon {
@@ -102,7 +106,7 @@ impl Tool {
             Tool::Ellipse => Icon::Ellipse,
             Tool::Hand => Icon::Hand,
             Tool::Zoom => Icon::Zoom,
-            Tool::Type => Icon::Type,
+            Tool::Type | Tool::VerticalType => Icon::Type,
         }
     }
     pub fn from_name(s: &str) -> Option<Tool> {
@@ -122,7 +126,7 @@ impl Tool {
             vec![Tool::Slip, Tool::Slide],
             vec![Tool::Pen, Tool::Rectangle, Tool::Ellipse],
             vec![Tool::Hand, Tool::Zoom],
-            vec![Tool::Type],
+            vec![Tool::Type, Tool::VerticalType],
         ]
     }
 }
@@ -470,6 +474,9 @@ pub struct UiState {
     /// Open guide dialog (Add Guide / Save Guides as Template / Manage Guides).
     #[serde(default)]
     pub guide_dialog: Option<GuideDialog>,
+    /// Open Text Properties dialog (the wrench in the Properties panel's Text section).
+    #[serde(default)]
+    pub text_props_dialog: Option<TextPropsDialog>,
     /// Open Window ▸ Workspaces dialog.
     #[serde(default)]
     pub workspace_dialog: Option<WorkspaceDialog>,
@@ -745,6 +752,20 @@ impl Default for DeleteTracksDraft {
     }
 }
 
+/// Draft of the Text Properties dialog of a text layer: its type (point text, or paragraph text
+/// wrapped in a box) and text styling.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TextPropsDialog {
+    pub clip: u64,
+    pub layer: usize,
+    pub paragraph: bool,
+    /// Vertical text is always point text.
+    pub vertical: bool,
+    pub ligatures: bool,
+    /// Ligatures when the dialog opened.
+    pub ligatures_was: bool,
+}
+
 /// The text layer being edited on the Program monitor: caret and selection anchor are byte
 /// offsets into the layer's text.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -813,6 +834,7 @@ impl Default for UiState {
             multicam_record: true,
             edit_cameras: None,
             guide_dialog: None,
+            text_props_dialog: None,
             workspace_dialog: None,
             clip_dialog: None,
             extras: Default::default(),

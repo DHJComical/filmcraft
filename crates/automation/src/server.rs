@@ -249,7 +249,7 @@ impl FilmcraftMcp {
                 .await
                 .map_err(join_error)?
             }
-            Backend::Bridge(b) => b.call("engine.execute", json!({"command": id, "params": params})).await,
+            Backend::Bridge(b) => b.execute(id, params).await,
         }
     }
 
@@ -397,14 +397,13 @@ impl FilmcraftMcp {
             Backend::Headless(s) => {
                 let s = s.clone();
                 let r = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, AutomationError> {
-                    let mut g = s.lock().unwrap_or_else(PoisonError::into_inner);
-                    if let Some(sec) = p.seconds {
-                        g.set_playhead(filmcraft_time::Tick::from_seconds_f64(sec));
-                    }
+                    let g = s.lock().unwrap_or_else(PoisonError::into_inner);
+                    // read-only: render at `seconds` without moving the playhead (#114)
+                    let t = p.seconds.map_or_else(|| g.playhead(), filmcraft_time::Tick::from_seconds_f64);
                     let (w, h) =
                         g.active_sequence().map(|q| (q.settings.width, q.settings.height)).ok_or_else(|| AutomationError::Other("no sequence".into()))?;
                     let scale = (max as f32 / w.max(h) as f32).min(1.0);
-                    let img = g.render_program(scale).ok_or_else(|| AutomationError::Other("no sequence".into()))?;
+                    let img = g.try_render_program_at(scale, t).map_err(|e| AutomationError::Other(e.to_string()))?;
                     png_rgba(img.w as u32, img.h as u32, img.over_black_rgba8(), max)
                 })
                 .await
@@ -415,12 +414,31 @@ impl FilmcraftMcp {
                 })
             }
             Backend::Bridge(b) => {
-                if let Some(sec) = p.seconds
-                    && let Err(e) = b.call("engine.execute", json!({"command": "playhead.set", "params": {"seconds": sec}})).await
-                {
+                let Some(sec) = p.seconds else {
+                    return self.screenshot(&b.clone(), Some("Program".into()), max).await;
+                };
+                // The Program monitor shows the playhead's frame, so the live playhead has to move
+                // for the screenshot; put it (and the selection, which may follow it) back after,
+                // so the tool stays read-only (#114).
+                let before = match self.run("sequence.inspect", json!({})).await {
+                    Ok(v) => v,
+                    Err(e) => return Ok(fail(e)),
+                };
+                if let Err(e) = self.run("playhead.set", json!({"seconds": sec})).await {
                     return Ok(fail(e));
                 }
-                self.screenshot(&b.clone(), Some("Program".into()), max).await
+                let shot = self.screenshot(&b.clone(), Some("Program".into()), max).await;
+                if let Some(t) = before.get("playhead").and_then(Value::as_i64) {
+                    let _ = self.run("playhead.set", json!({"time": t})).await;
+                }
+                // only when it changed: selecting also leaves trim mode
+                let now = self.run("sequence.inspect", json!({})).await.ok();
+                if let Some(sel) = before.get("selection").filter(|v| v.is_array())
+                    && now.as_ref().and_then(|n| n.get("selection")) != Some(sel)
+                {
+                    let _ = self.run("timeline.select", json!({"clips": sel})).await;
+                }
+                shot
             }
         }
     }
@@ -574,8 +592,8 @@ impl ServerHandler for FilmcraftMcp {
             return Err(McpError::invalid_params(m, None));
         }
         // A blocking export reports progress and can be cancelled (docs/agents.md § Long exports).
+        // Bridge mode too: the app runs it as a job, so it stays responsive (#91, #92).
         if request.name == "command_run"
-            && matches!(&*self.backend, Backend::Headless(_))
             && let Some(a) = &request.arguments
             && let Some(id) = a.get("id").and_then(Value::as_str)
         {
@@ -643,6 +661,27 @@ mod tests {
         assert!(v["cuts"].as_u64().unwrap() >= 2);
         let r = m.render_frame(Parameters(RenderParams { seconds: Some(1.0), max_side: Some(320) })).await.unwrap();
         assert_ne!(r.is_error, Some(true));
+    }
+
+    /// `render_frame` / `render_preview` are annotated read-only (#114): rendering at `seconds`
+    /// leaves the playhead, and the selection that follows it, where they were, and still renders
+    /// the frame at `seconds`.
+    #[tokio::test]
+    async fn rendering_at_a_time_does_not_move_the_playhead() {
+        let m = FilmcraftMcp::headless(demo());
+        m.run("sequence.selectionFollowsPlayhead", json!({"on": true})).await.unwrap();
+        m.run("playhead.set", json!({"seconds": 1.0})).await.unwrap();
+        let before = m.run("sequence.inspect", json!({})).await.unwrap();
+        let png = |r: CallToolResult| serde_json::to_string(&r.content).unwrap();
+        let at_playhead = png(m.render_frame(Parameters(RenderParams { seconds: None, max_side: Some(64) })).await.unwrap());
+        for seconds in [5.0, 8.0] {
+            let r = m.render_frame(Parameters(RenderParams { seconds: Some(seconds), max_side: Some(64) })).await.unwrap();
+            assert_ne!(png(r), at_playhead, "renders the frame at {seconds} s");
+            m.render_preview(Parameters(RenderParams { seconds: Some(seconds), max_side: Some(64) })).await.unwrap();
+        }
+        let after = m.run("sequence.inspect", json!({})).await.unwrap();
+        assert_eq!(after["playhead"], before["playhead"]);
+        assert_eq!(after["selection"], before["selection"]);
     }
 
     /// One request/response exchange over `serve_io`, as an MCP client sees it.

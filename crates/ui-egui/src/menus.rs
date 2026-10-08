@@ -25,6 +25,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("app.language.english", "English", ["Edit", "Language"], None),
     uic!("app.language.japanese", "日本語", ["Edit", "Language"], None),
     uic!("app.language.spanish", "Español", ["Edit", "Language"], None),
+    uic!("app.language.portuguese", "Português (Brasil)", ["Edit", "Language"], None),
     uic!("playback.toggle", "Play/Stop", [], Some("Space")),
     uic!("playback.forward", "Shuttle Right", [], Some("L")),
     uic!("playback.stop", "Shuttle Stop", [], Some("K")),
@@ -114,6 +115,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("tool.hand", "Hand Tool", [], Some("H")),
     uic!("tool.zoom", "Zoom Tool", [], Some("Z")),
     uic!("tool.type", "Type Tool", [], Some("T")),
+    uic!("tool.verticalType", "Vertical Type Tool", [], None),
     uic!("mode.import", "Import", [], None),
     uic!("mode.edit", "Edit", [], None),
     uic!("mode.export", "Export", ["File", "Export"], Some("Cmd+M")),
@@ -150,7 +152,7 @@ pub fn panel_command_id(p: PanelKind) -> String {
 
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
-    if matches!(id, "app.language.english" | "app.language.japanese" | "app.language.spanish") {
+    if matches!(id, "app.language.english" | "app.language.japanese" | "app.language.spanish" | "app.language.portuguese") {
         // Japanese needs the craft-fonts (built with CRAFT_FONTS_DIR) or a font installed on the system
         if id == "app.language.japanese" && !crate::i18n::install_japanese_font(ctx) {
             return Err("no Japanese font is installed on this system (for example Noto Sans CJK JP); the interface stays in English".into());
@@ -158,6 +160,7 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
         let language = match id {
             "app.language.japanese" => crate::i18n::Language::Ja,
             "app.language.spanish" => crate::i18n::Language::Es,
+            "app.language.portuguese" => crate::i18n::Language::PtBr,
             _ => crate::i18n::Language::En,
         };
         // The preference is updated in memory before it is written, so a failed write (read-only
@@ -400,7 +403,23 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
     if let Err(e) = &r {
         app.ui.status = e.clone();
     }
+    if r.is_ok() && matches!(id, "edit.copy" | "edit.cut") {
+        put_clip_names_on_system_clipboard(app, ctx);
+    }
     r
+}
+
+/// Copied clips live in the session, but on Windows and Linux Ctrl+V only reaches the app when the
+/// system clipboard holds text (an empty clipboard sends no paste at all, #199). Put the copied
+/// clip names there, like other editors put their own data on the clipboard, so Ctrl+V pastes the
+/// clips right after a copy.
+fn put_clip_names_on_system_clipboard(app: &FilmcraftApp, ctx: &egui::Context) {
+    let names: Vec<&str> = app.session.state.clipboard.iter().map(|(_, _, c)| c.name.as_str()).collect();
+    if names.is_empty() {
+        return;
+    }
+    let text = names.join("\n");
+    ctx.copy_text(if text.trim().is_empty() { format!("{} clips", names.len()) } else { text });
 }
 
 /// A menu tree entry for display / `ui.menu.list`.
@@ -426,6 +445,7 @@ pub fn menu_items(app: &FilmcraftApp) -> Vec<MenuItem> {
             "app.language.english" => it.checked = Some(app.ui.language == crate::i18n::Language::En),
             "app.language.japanese" => it.checked = Some(app.ui.language == crate::i18n::Language::Ja),
             "app.language.spanish" => it.checked = Some(app.ui.language == crate::i18n::Language::Es),
+            "app.language.portuguese" => it.checked = Some(app.ui.language == crate::i18n::Language::PtBr),
             _ => {}
         }
         if it.id.starts_with("view.") {
@@ -569,7 +589,7 @@ pub fn menu_bar(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     let items = menu_items(app);
     let ctx = ui.ctx().clone();
     let mut clicked: Option<String> = None;
-    egui::MenuBar::new().ui(ui, |ui| {
+    egui::MenuBar::new().config(egui::containers::menu::MenuConfig::new().style(crate::theme::menu_style)).ui(ui, |ui| {
         for top in MENUS {
             let mine: Vec<&MenuItem> = items.iter().filter(|i| i.path.first().map(String::as_str) == Some(top)).collect();
             ui.menu_button(app.ui.language.tr(top), |ui| {

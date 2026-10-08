@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use filmcraft_engine::Services;
-use filmcraft_ui_egui::FilmcraftApp;
+use filmcraft_ui_egui::{FilmcraftApp, RelinkHint};
 use serde_json::{Value, json};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -153,12 +153,43 @@ pub fn take_files(files: Vec<web_sys::File>) {
     });
 }
 
+/// Files a picker returned: imported, or with a relink hint, the first one is registered under
+/// `/files/<name>` and the hint's command runs on it (#111).
+fn picked(files: Vec<web_sys::File>, relink: Option<RelinkHint>) {
+    let Some(hint) = relink else { return take_files(files) };
+    let Some(f) = files.into_iter().next() else { return };
+    wasm_bindgen_futures::spawn_local(async move {
+        let path = fs::register_blob(&f.name(), f.clone().into());
+        crate::recovery::keep_media(&path, &f);
+        let mut params = hint.params;
+        if !params.is_object() {
+            params = json!({});
+        }
+        params["path"] = json!(path);
+        let command = hint.command;
+        let outcome = on_ui(move |w, _| w.app.session.execute(&command, params).map_err(|e| e.to_string())).await;
+        crate::post(move |w, _| match outcome {
+            Ok(v) => {
+                if let Some(n) = v.get("relinked").and_then(Value::as_array).map(Vec::len) {
+                    w.app.status(format!("Linked {n} clip(s)"));
+                }
+            }
+            Err(e) => w.app.status(e),
+        });
+    });
+}
+
 fn has_fsa_picker() -> bool {
     web_sys::window().is_some_and(|w| js_sys::Reflect::has(&w, &"showOpenFilePicker".into()).unwrap_or(false))
 }
 
 /// Let the user pick files: `showOpenFilePicker` when available, else a file input.
 pub fn pick(exts: &[&str], multiple: bool) {
+    pick_then(exts, multiple, None);
+}
+
+/// [`pick`], handing the files to [`picked`]: a cancelled picker leaves nothing pending.
+fn pick_then(exts: &[&str], multiple: bool, relink: Option<RelinkHint>) {
     let accept: Vec<String> = exts.iter().map(|e| format!(".{e}")).collect();
     if has_fsa_picker() {
         let opts = js_sys::Object::new();
@@ -178,7 +209,7 @@ pub fn pick(exts: &[&str], multiple: bool) {
                     files.push(f);
                 }
             }
-            take_files(files);
+            picked(files, relink);
         });
         return;
     }
@@ -190,7 +221,7 @@ pub fn pick(exts: &[&str], multiple: bool) {
     let inp = input.clone();
     let on_change = Closure::<dyn FnMut()>::new(move || {
         if let Some(list) = inp.files() {
-            take_files((0..list.length()).filter_map(|i| list.get(i)).collect());
+            picked((0..list.length()).filter_map(|i| list.get(i)).collect(), relink.clone());
         }
     });
     input.set_onchange(Some(on_change.as_ref().unchecked_ref()));
@@ -231,4 +262,12 @@ pub fn install_hooks(app: &mut FilmcraftApp) {
     // Saving writes the file in memory and offers it as a download (`fs::WebServices`).
     app.hooks.pick_save = Some(Box::new(|name: &str| Some(format!("/projects/{name}"))));
     app.hooks.pick_save_as = Some(Box::new(|_filter: &str, _exts: &[&str], name: &str| Some(format!("/exports/{name}"))));
+    // Link Media ▸ Locate…, Attach Proxies, Reconnect Full Resolution: the picker is async, so the
+    // hint's command runs once the user has chosen (#111).
+    app.hooks.pick_file_for_relink = Some(Box::new(|exts: &[&str], hint: Option<RelinkHint>| {
+        if hint.is_some() {
+            pick_then(exts, false, hint);
+        }
+        None
+    }));
 }

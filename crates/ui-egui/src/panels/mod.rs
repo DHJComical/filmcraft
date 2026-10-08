@@ -55,6 +55,16 @@ use crate::FilmcraftApp;
 use crate::dock::PanelKind;
 use crate::theme::Tokens;
 
+/// ` · 2:05 left`: the time a job has left, as it follows a percentage.
+pub fn left_text(d: std::time::Duration) -> String {
+    tlf!(" · {time} left", time = filmcraft_engine::export::format_eta(d))
+}
+
+/// [`left_text`] for a job or queue item whose JSON has `etaSeconds`, nothing while it is null.
+pub fn eta_suffix(job: &serde_json::Value) -> String {
+    job["etaSeconds"].as_f64().and_then(|s| std::time::Duration::try_from_secs_f64(s).ok()).map(left_text).unwrap_or_default()
+}
+
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect) {
     match p {
         PanelKind::Program if !app.session.state.edit_points.is_empty() => trim_monitor::show(app, ui, rect),

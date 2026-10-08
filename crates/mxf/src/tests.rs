@@ -361,3 +361,29 @@ fn drop_frame_timecode_format() {
     let tc = Timecode { start: 90_000 + 25 * 61 + 3, rounded_base: 25, drop_frame: false };
     assert_eq!(tc.format(), "01:01:01:03");
 }
+
+#[test]
+fn hostile_pcm_requests_fail_before_allocation() {
+    let (to, flags) = ipbb();
+    let bytes = build(5, prores_like, &to, &flags);
+    let mut file = open(&bytes).unwrap();
+    let track = file.track_of_kind(TrackKind::Sound).unwrap();
+    file.tracks[track].sound.as_mut().unwrap().channels = u32::MAX;
+    assert!(file.read_pcm(&bytes, track, 0, 100).is_err());
+    file.tracks[track].sound.as_mut().unwrap().channels = 2;
+    file.tracks[track].sound.as_mut().unwrap().block_align = u32::MAX;
+    assert!(file.read_pcm(&bytes, track, 0, 100).is_err());
+    assert!(file.read_pcm(&bytes, track, 0, usize::MAX).is_err());
+    assert!(crate::decode_pcm(&[], SoundFormat::Pcm, usize::MAX, 16, 4).is_err());
+}
+
+#[test]
+fn a_corrupt_index_position_cannot_allocate_a_giant_sparse_table() {
+    let (to, flags) = ipbb();
+    let mut bytes = build(5, prores_like, &to, &flags);
+    let prefix = [0x3f, 0x0c, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0];
+    let at = bytes.windows(prefix.len()).position(|w| w == prefix).unwrap();
+    bytes[at + 4..at + 12].copy_from_slice(&49_999_999i64.to_be_bytes());
+    let file = open(&bytes).unwrap();
+    assert_eq!(file.tracks[file.track_of_kind(TrackKind::Picture).unwrap()].samples.len(), 5);
+}

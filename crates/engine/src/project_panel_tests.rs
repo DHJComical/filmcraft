@@ -286,3 +286,22 @@ fn usage_counts_sequence_uses() {
     assert_eq!(text, (if v > 0 { v } else { a }).to_string());
     assert!(!matches!(it.kind, ItemKind::Graphic { .. }));
 }
+
+#[test]
+fn select_all_selects_every_project_item() {
+    let mut s = demo();
+    assert!(s.project.items.len() >= 3);
+    s.state.project_selection.clear();
+    let r = s.execute("project.selectAll", json!({})).unwrap();
+    assert_eq!(r["selected"].as_u64(), Some(s.project.items.len() as u64));
+    assert_eq!(s.state.project_selection.len(), s.project.items.len());
+    assert!(s.project.items.keys().all(|i| s.state.project_selection.contains(i)));
+    s.execute("project.deselectAll", json!({})).unwrap();
+    assert!(s.state.project_selection.is_empty());
+    // the timeline Select All still selects timeline clips and leaves the Project panel alone
+    s.execute("project.selectAll", json!({})).unwrap();
+    let before = s.state.project_selection.clone();
+    s.execute("edit.selectAll", json!({})).unwrap();
+    assert!(!s.state.selection.is_empty());
+    assert_eq!(s.state.project_selection, before);
+}

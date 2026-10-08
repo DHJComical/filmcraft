@@ -532,3 +532,33 @@ fn waveform_peaks_do_not_survive_opening_another_project() {
     let now = d.harness.state().tl.peaks.lock().unwrap().get(&item).cloned();
     assert!(now.is_none_or(|p| !std::sync::Arc::ptr_eq(&p, &old)), "peaks from the previous project were reused");
 }
+
+/// #164: on a real keyboard, pressing Alt+Shift+J sends each modifier key on its own first (egui
+/// reports modifier keys as key events). The shortcut recorder took the Alt press and refused it
+/// ("AltLeft can't be used as a shortcut"), so no chord with Shift, Ctrl or Alt could be recorded.
+#[test]
+fn recording_a_shortcut_skips_the_modifier_key_presses() {
+    let mut d = Driver::demo();
+    d.ok("ui.menu.invoke", json!({"id": "app.keyboardShortcuts"}));
+    d.frames(2);
+    d.ok("ui.click", json!({"id": "shortcuts.search"}));
+    d.ok("ui.type", json!({"text": "add edit"}));
+    d.frames(2);
+    d.ok("ui.click", json!({"id": "shortcuts.add.sequence.addEdit"}));
+    d.frames(1);
+    // what a real keyboard sends for Alt+Shift+J: Alt, then Shift, then J
+    let alt = egui::Modifiers { alt: true, ..Default::default() };
+    let alt_shift = egui::Modifiers { alt: true, shift: true, ..Default::default() };
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers };
+    let events = &mut d.harness.input_mut().events;
+    events.push(key(egui::Key::AltLeft, alt));
+    events.push(key(egui::Key::ShiftLeft, alt_shift));
+    events.push(key(egui::Key::J, alt_shift));
+    d.frames(2);
+    d.ok("ui.click", json!({"id": "shortcuts.ok"}));
+    d.frames(2);
+    // added next to Cmd+K (`shortcuts.get` lists every chord of the command)
+    let got = d.ok("engine.execute", json!({"command": "shortcuts.get", "params": {"command": "sequence.addEdit"}})).to_string();
+    assert!(got.contains("Alt+Shift+J"), "{got}");
+    assert!(got.contains("Cmd+K"), "{got}");
+}

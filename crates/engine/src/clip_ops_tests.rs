@@ -837,3 +837,67 @@ fn subclip_source_monitor_trims_and_markers() {
     s.execute("edit.undo", json!({})).unwrap();
     assert!(matches!(s.project.item(sub).unwrap().kind, ItemKind::Subclip { restrict_trims: false, .. }));
 }
+
+/// #29: a Color Matte's color can be changed after it is created; the generated frames follow,
+/// and undo brings the old color back (the media pool regenerates the matte, it doesn't keep
+/// serving the first one).
+#[test]
+fn color_matte_color_changes_and_undoes() {
+    let mut s = demo();
+    let matte = s.execute("file.newColorMatte", json!({"width": 64, "height": 36, "color": "#ff0000"})).unwrap()["item"].as_u64().unwrap();
+    let px = |s: &Session| {
+        let f = s.source(ItemId(matte)).unwrap().video_frame(filmcraft_media::FrameRequest::full(Tick::ZERO)).unwrap();
+        f.to_rgba8()[..3].to_vec()
+    };
+    assert_eq!(px(&s), [255, 0, 0]);
+    let r = s.execute("project.matteColor", json!({"item": matte, "color": "#0000ff"})).unwrap();
+    assert_eq!(r["color"], "#0000ff");
+    assert_eq!(px(&s), [0, 0, 255]);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(px(&s), [255, 0, 0]);
+    // the selected matte when no item is named; anything else is refused
+    s.state.project_selection = vec![ItemId(matte)];
+    s.execute("project.matteColor", json!({"color": "#00ff00"})).unwrap();
+    assert_eq!(px(&s), [0, 255, 0]);
+    let bars = s.execute("file.newBarsAndTone", json!({})).unwrap()["item"].as_u64().unwrap();
+    assert!(s.execute("project.matteColor", json!({"item": bars, "color": "#00ff00"})).is_err());
+    assert!(s.execute("project.matteColor", json!({"item": matte, "color": "green"})).is_err());
+}
+
+/// A damaged project whose subclip is its own parent (#66): `media_duration` followed the chain
+/// without a bound and overflowed the stack. It gives up after a few hops now.
+#[test]
+fn a_cyclic_subclip_chain_has_no_media_duration() {
+    let mut s = demo();
+    let ocean = item_named(&s, "Ocean_Sunset.mp4");
+    s.execute("source.open", json!({"item": ocean.0})).unwrap();
+    let sub = ItemId(s.execute("clip.makeSubclip", json!({})).unwrap()["item"].as_u64().unwrap());
+    s.execute("clip.editSubclip", json!({"item": sub.0, "restrictTrims": false})).unwrap();
+    let Some(ItemKind::Subclip { parent, .. }) = std::sync::Arc::make_mut(&mut s.project).item_mut(sub).map(|i| &mut i.kind) else { panic!() };
+    *parent = sub;
+    assert_eq!(crate::media_duration(&s.project, &s.media, sub), None);
+}
+
+/// #164: Add Edit with a clip selected cut every targeted track. Like Premiere it now cuts only
+/// the selected clips under the playhead; with nothing selected there, the targeted tracks.
+#[test]
+fn add_edit_cuts_only_the_selected_clips() {
+    let mut s = demo();
+    let count = |s: &Session| {
+        let q = s.active_sequence().unwrap();
+        (q.video_tracks.iter().map(|t| t.items.len()).sum::<usize>(), q.audio_tracks.iter().map(|t| t.items.len()).sum::<usize>())
+    };
+    // a V1 clip and a time inside it
+    let first = v1(&s)[1].clone();
+    let t = first.start + filmcraft_time::Tick(first.duration.0 / 2);
+    let (v0, a0) = count(&s);
+    s.state.selection = vec![first.id];
+    s.execute("sequence.addEdit", json!({"time": t.0})).unwrap();
+    let (v1n, a1n) = count(&s);
+    assert_eq!((v1n, a1n), (v0 + 1, a0), "only the selected V1 clip is cut");
+    // nothing selected under the playhead: every targeted track is cut
+    s.execute("edit.undo", json!({})).unwrap();
+    s.state.selection.clear();
+    let r = s.execute("sequence.addEdit", json!({"time": t.0})).unwrap();
+    assert!(r["cuts"].as_u64().unwrap() > 1, "{r}");
+}

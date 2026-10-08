@@ -179,7 +179,8 @@ pub fn progress(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 (false, _) => {
                     let s = j["status"].as_str().unwrap_or("");
                     let n = format!("{} / {}", j["done"].as_u64().unwrap_or(0), j["total"].as_u64().unwrap_or(0));
-                    if s.is_empty() { format!("{:.0} %  ({n})", frac * 100.0) } else { format!("{:.0} %  {s}", frac * 100.0) }
+                    let left = super::eta_suffix(j);
+                    if s.is_empty() { format!("{:.0} %  ({n}){left}", frac * 100.0) } else { format!("{:.0} %  {s}{left}", frac * 100.0) }
                 }
             };
             let bar = Rect::from_min_max(pos2(r.min.x + 8.0, r.min.y + 24.0), pos2(r.max.x - 36.0, r.min.y + 30.0));

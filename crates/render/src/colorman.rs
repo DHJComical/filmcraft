@@ -10,17 +10,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use filmcraft_color::{ColorPipeline, ColorSpace, InputTransform, OutputTransform, Range};
 use filmcraft_frame::VideoFrame;
-use filmcraft_project::{ItemId, ItemKind, Project};
+use filmcraft_project::{ItemId, Project};
 
 use crate::Image;
 
 /// The Interpret Footage colour-space override of an item (following subclips to their media).
 pub fn override_of(project: &Project, item: ItemId) -> Option<ColorSpace> {
-    match &project.item(item)?.kind {
-        ItemKind::Media(m) => m.interpret.color_space,
-        ItemKind::Subclip { parent, .. } => override_of(project, *parent),
-        _ => None,
-    }
+    project.resolve_media(item).and_then(|(_, media, _)| media.interpret.color_space)
 }
 
 /// The colour space a frame of `item` is interpreted in.
@@ -39,11 +35,7 @@ type Key = (ColorSpace, Range, ColorPipeline, Option<u32>);
 /// The content peak (cd/m²) of an item's HDR metadata (MaxCLL, else the mastering display peak),
 /// following subclips to their media. Used as the tone-mapping source peak of PQ media.
 pub fn source_peak_nits(project: &Project, item: ItemId) -> Option<f32> {
-    match &project.item(item)?.kind {
-        ItemKind::Media(m) => m.info.video.as_ref()?.hdr.as_ref()?.peak_nits(),
-        ItemKind::Subclip { parent, .. } => source_peak_nits(project, *parent),
-        _ => None,
-    }
+    project.resolve_media(item).and_then(|(_, media, _)| media.info.video.as_ref()?.hdr.as_ref()?.peak_nits())
 }
 
 /// A cached input transform (`peak_nits`: the PQ content peak from the file's HDR metadata).
@@ -115,7 +107,7 @@ mod tests {
     fn mastering_metadata_sets_the_tone_mapping_peak() {
         use filmcraft_color::HdrMetadata;
         use filmcraft_media::MediaSource;
-        use filmcraft_project::{Label, MediaClip, MediaRef};
+        use filmcraft_project::{ItemKind, Label, MediaClip, MediaRef};
         let pq = ColorInfo { transfer: Transfer::Pq, primaries: Primaries::Bt2020, ..ColorInfo::SRGB_FULL };
         // a PQ grey of ≈ 2000 cd/m² (code 0.83) and one of ≈ 4000 cd/m² (code 0.90)
         let px = |nits: f32| (filmcraft_color::pq_inverse_eotf(nits / 10_000.0) * 255.0).round() as u8;

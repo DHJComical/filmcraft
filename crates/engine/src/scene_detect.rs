@@ -81,11 +81,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// The media item a clip shows (a subclip resolves to its parent: subclip clips use the parent's
 /// media time).
 fn media_root(p: &filmcraft_project::Project, item: ItemId) -> Option<ItemId> {
-    match &p.item(item)?.kind {
-        ItemKind::Media(_) => Some(item),
-        ItemKind::Subclip { parent, .. } => media_root(p, *parent),
-        _ => None,
-    }
+    p.resolve_media(item).map(|(root, _, _)| root)
 }
 
 struct Work {

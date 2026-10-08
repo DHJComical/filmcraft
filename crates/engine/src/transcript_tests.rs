@@ -163,8 +163,11 @@ fn generate_without_a_transcriber() {
     let (mut s, item, _) = session();
     s.transcriber = None;
     let e = s.execute("transcript.generate", json!({"items": [item.0], "model": "nope"})).unwrap_err().to_string();
-    assert!(e.contains("unknown speech model"), "{e}");
+    // a build without speech-to-text says that first: the command is disabled (#97)
+    let why = if filmcraft_speech::available() { "unknown speech model" } else { "not available in this build" };
+    assert!(e.contains(why), "{e}");
     if !filmcraft_speech::available() {
+        assert!(!s.is_enabled("sequence.transcribe"), "Transcribe Sequence follows transcript.generate");
         let e = s.execute("transcript.generate", json!({"items": [item.0]})).unwrap_err().to_string();
         assert!(e.contains("whisper") && e.contains("not available"), "{e}");
         #[cfg(not(feature = "speech-download"))]
@@ -172,6 +175,7 @@ fn generate_without_a_transcriber() {
     }
     // defaults to the media of the open sequence's audio clips
     s.transcriber = Some(Arc::new(FixedTranscriber { transcript: Transcript::default(), id: "empty".into() }));
+    assert!(s.is_enabled("sequence.transcribe"), "an installed recogniser enables Transcribe Sequence");
     let r = s.execute("transcript.generate", json!({})).unwrap();
     assert!(r["items"].as_array().unwrap().len() >= 2, "{r}");
 }

@@ -2,19 +2,22 @@
 //! the Properties / Essential Graphics panels.
 //!
 //! Monitor overlay:
-//! - **Type tool (T):** click on empty picture → a new text layer (in the selected graphic clip
-//!   under the playhead, else a new graphic clip) with a caret; click on a text layer → caret at
+//! - **Type tool (T):** click on empty picture → a new point-text layer (in the selected graphic
+//!   clip under the playhead, else a new graphic clip) with a caret; drag on empty picture → a new
+//!   paragraph-text layer whose box is the dragged rectangle; click on a text layer → caret at
 //!   the click. Typing edits the text (one undo step per typing session); arrows, Home/End,
 //!   Shift-selection, ⌘A, ⌘C/⌘X/⌘V, Return (new line) and Esc (stop editing) work as in a text
 //!   field. Double-clicking a text layer with the Selection tool also edits it.
-//! - **Selection tool:** click selects a layer (bounding box with handles); drag moves it; drag a
-//!   handle scales it towards the pointer with the opposite side held in place (a corner scales
-//!   both axes alike, an edge handle only its own).
+//! - **Selection tool:** click selects a layer (bounding box with handles and anchor point); drag
+//!   moves it; drag the anchor point to move that alone. What a handle does depends on the layer
+//!   (see [`HandleDrag`]): point text scales about its anchor point, a paragraph-text box is
+//!   resized and its text re-wraps, a shape stretches away from its opposite side.
 //! - **Rectangle / Ellipse tools:** drag out a shape. **Pen tool:** click points; click the first
 //!   point again (or press Return) to close the path; Esc cancels.
 //!
 //! All edits go through `graphics.*` commands. Automation ids: `program.layer.<clip>.<layer>`,
-//! `program.layer.<clip>.<layer>.handle.<n>`, `program.textEdit`, `graphics.*` in the panels.
+//! `program.layer.<clip>.<layer>.handle.<n>`, `program.layer.<clip>.<layer>.anchor`,
+//! `program.textEdit`, `graphics.*` in the panels.
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use filmcraft_geom::{Affine, Vec2};
@@ -26,7 +29,7 @@ use serde_json::{Value, json};
 
 use crate::FilmcraftApp;
 use crate::icons::{self, Icon};
-use crate::state::{GfxEdit, Tool};
+use crate::state::{GfxEdit, TextPropsDialog, Tool};
 use crate::theme::Tokens;
 
 /// A graphic layer visible at the playhead, with its layer→screen transform.
@@ -82,7 +85,8 @@ pub fn selected_graphic(app: &FilmcraftApp) -> Option<(ClipId, TrackItem)> {
     app.session.state.selection.iter().copied().find(|c| is_graphic_clip(app, *c)).and_then(|c| q.find_item(c).map(|(_, it)| (c, it.clone())))
 }
 
-/// Layers of the graphic clips visible at the playhead, front-most first.
+/// Layers of the graphic clips visible at the playhead, front-most first. A layer whose
+/// visibility is off is not in the picture, so it has no box and cannot be clicked either.
 pub fn visible_layers(app: &FilmcraftApp, pic: Rect, frame: (u32, u32)) -> Vec<LayerView> {
     let Some(seq) = app.session.active_sequence() else { return Vec::new() };
     let t = app.session.playhead();
@@ -103,7 +107,7 @@ pub fn visible_layers(app: &FilmcraftApp, pic: Rect, frame: (u32, u32)) -> Vec<L
         let base = screen.then_apply(&filmcraft_render::motion_matrix(seq, it, size, mt));
         let idx = layer_indices(&it.effects);
         for (li, &ei) in idx.iter().enumerate().rev() {
-            if let Some(spec) = eval_layer(&it.effects[ei], mt, size) {
+            if let Some(spec) = eval_layer(&it.effects[ei], mt, size).filter(|s| s.enabled) {
                 let local = layer_local_bounds(&spec);
                 out.push(LayerView { clip: it.id, layer: li, to_screen: base.then_apply(&layer_matrix(&spec)), canvas_to_screen: base, spec, local });
             }
@@ -151,9 +155,13 @@ fn next_boundary(s: &str, i: usize) -> usize {
 #[derive(Clone, Copy, Debug)]
 enum DragKind {
     Move,
-    /// Handle `n` of the layer's box (see [`handle_points`]): scales it with the opposite side held in place.
-    Scale(usize),
+    /// Handle `n` of the layer's box (see [`handle_points`] and [`HandleDrag`]).
+    Handle(usize),
+    /// The layer's anchor point: it moves, the layer stays where it is.
+    Anchor,
     NewShape,
+    /// The Type tool dragging out the box of a new paragraph-text layer.
+    NewTextBox,
     TextSelect,
 }
 
@@ -213,6 +221,161 @@ impl HandleScale {
     }
 }
 
+/// A handle closer than this (in points) to the anchor point scales point text as if it were this
+/// much further away, so that a handle on the anchor does not scale without bound. Measured in
+/// Premiere Pro 26 with the Program monitor at Fit.
+const NEAR_ANCHOR: f32 = 60.0;
+
+/// What dragging handle `n` of a layer from `start` to `cur` does, as Premiere Pro does it: point
+/// text scales about its anchor point, a paragraph-text box is resized (its text re-wraps at the
+/// same size), and a shape stretches away from its opposite side.
+enum HandleDrag {
+    Stretch(HandleScale),
+    /// Scale both axes by `f` about the anchor point, which is at `anchor` on screen.
+    Scale {
+        anchor: Pos2,
+        f: f32,
+    },
+    /// The text box becomes `rect` (`[x0, y0, x1, y1]` in the layer's pixels; it was `from`).
+    /// `tall`: the drag sets the box's height too.
+    Resize {
+        rect: [f32; 4],
+        from: [f32; 4],
+        tall: bool,
+    },
+}
+
+impl HandleDrag {
+    fn new(v: &LayerView, n: usize, start: Pos2, cur: Pos2) -> Self {
+        let n = n.min(7);
+        let quad = v.quad();
+        let Some(t) = text_of(&v.spec) else { return Self::Stretch(HandleScale::new(&quad, n, start, cur)) };
+        if is_paragraph(t) {
+            // a box without a height is as tall as its text
+            let from = if t.box_height > 0.0 { [0.0, 0.0, t.box_width, t.box_height] } else { [0.0, v.local[1], t.box_width, v.local[3]] };
+            let (dx, dy) = match (v.to_local(start), v.to_local(cur)) {
+                (Some(a), Some(b)) => (b.0 - a.0, b.1 - a.1),
+                _ => (0.0, 0.0),
+            };
+            // the handle follows the pointer and the opposite side stays; the box does not flip
+            let min = (t.size * 0.5).max(1.0);
+            let [mut x0, mut y0, mut x1, mut y1] = from;
+            if matches!(n, 0 | 3 | 7) {
+                x0 = (x0 + dx).min(x1 - min);
+            }
+            if matches!(n, 1 | 2 | 5) {
+                x1 = (x1 + dx).max(x0 + min);
+            }
+            if matches!(n, 0 | 1 | 4) {
+                y0 = (y0 + dy).min(y1 - min);
+            }
+            if matches!(n, 2 | 3 | 6) {
+                y1 = (y1 + dy).max(y0 + min);
+            }
+            return Self::Resize { rect: [x0, y0, x1, y1], from, tall: t.box_height > 0.0 || !matches!(n, 5 | 7) };
+        }
+        // Every handle scales both axes alike. Only the pointer's travel along one side of the box
+        // counts: along its width for the two side handles, along its height for all the others.
+        let anchor = anchor_screen(v);
+        let axis = if matches!(n, 5 | 7) { (quad[1] - quad[0]).normalized() } else { (quad[3] - quad[0]).normalized() };
+        let handle = handle_points(&quad)[n];
+        let from = (handle - anchor).dot(axis);
+        // Away from the anchor grows. A handle sitting on the anchor counts as just inside the box
+        // (where a letter's side bearing puts it in Premiere), so dragging it into the box grows.
+        let centre = quad[0] + (quad[2] - quad[0]) * 0.5;
+        let away = if from.abs() > 0.5 {
+            from.signum()
+        } else if (centre - handle).dot(axis) < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
+        let reach = from.abs() + if from.abs() < NEAR_ANCHOR { NEAR_ANCHOR } else { 0.0 };
+        let f = 1.0 + (cur - start).dot(axis) * away / reach;
+        Self::Scale { anchor, f: if f.is_finite() { f.max(0.01) } else { 1.0 } }
+    }
+
+    /// The layer's box on screen as the drag leaves it.
+    fn quad(&self, v: &LayerView) -> [Pos2; 4] {
+        match self {
+            Self::Stretch(h) => v.quad().map(|q| h.apply(q)),
+            Self::Scale { anchor, f } => v.quad().map(|q| *anchor + (q - *anchor) * *f),
+            Self::Resize { rect: b, .. } => [(b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])].map(|(x, y)| sp(&v.to_screen, x, y)),
+        }
+    }
+
+    /// The `graphics.set` properties that carry out the drag.
+    fn props(&self, v: &LayerView, n: usize) -> Value {
+        let tr = &v.spec.transform;
+        match self {
+            Self::Stretch(h) => {
+                // the layer scales about its anchor, so it also moves to keep the pinned side still
+                let a = anchor_screen(v);
+                let delta = unscale(&v.canvas_to_screen, h.apply(a) - a);
+                let mut props = json!({
+                    "scale": tr.scale.y * 100.0 * h.fy as f64,
+                    "scale_width": tr.scale.x * 100.0 * h.fx as f64,
+                    "position": [tr.position.x + delta.x, tr.position.y + delta.y],
+                });
+                if n >= 4 {
+                    // an edge stretches one axis only
+                    props["uniform_scale"] = json!(false);
+                }
+                props
+            }
+            Self::Scale { f, .. } => json!({"scale": tr.scale.y * 100.0 * *f as f64, "scale_width": tr.scale.x * 100.0 * *f as f64}),
+            Self::Resize { rect, from, tall } => {
+                // the box's top-left corner is the layer's origin: when it moves, the anchor point
+                // is renumbered so that it (and the position) stay on the same spot
+                let mut props = json!({
+                    "box_width": rect[2] - rect[0],
+                    "anchor": [tr.anchor.x - (rect[0] - from[0]) as f64, tr.anchor.y - (rect[1] - from[1]) as f64],
+                });
+                if *tall {
+                    props["box_height"] = json!(rect[3] - rect[1]);
+                }
+                props
+            }
+        }
+    }
+}
+
+/// Paragraph text: wrapped in a box (vertical text never is).
+fn is_paragraph(t: &filmcraft_project::graphic::TextProps) -> bool {
+    t.box_width > 0.0 && !t.vertical
+}
+
+/// The layer's anchor point on screen.
+fn anchor_screen(v: &LayerView) -> Pos2 {
+    sp(&v.to_screen, v.spec.transform.anchor.x as f32, v.spec.transform.anchor.y as f32)
+}
+
+/// A screen offset in the units `m` maps to the screen (its translation left out).
+fn unscale(m: &Affine, off: egui::Vec2) -> Vec2 {
+    Affine { e: 0.0, f: 0.0, ..*m }.inverse().map(|i| i.apply(Vec2::new(off.x as f64, off.y as f64))).unwrap_or_default()
+}
+
+/// `graphics.newText` for the Type tool: point text at `at`, or paragraph text in the box from
+/// `at` to `corner`.
+fn new_text_action(app: &FilmcraftApp, pic: Rect, frame: (u32, u32), at: Pos2, corner: Option<Pos2>) -> (String, Value) {
+    let (into, m) = canvas_target(app, pic, frame);
+    let a = to_canvas(&m, at);
+    let size = 100.0 * frame.1 as f64 / 1080.0;
+    let mut prm = json!({"text": "", "position": [a.x, a.y], "size": size.round()});
+    if let Some(b) = corner.map(|c| to_canvas(&m, c)) {
+        let (w, h) = ((b.x - a.x).abs(), (b.y - a.y).abs());
+        // a box too small to hold a letter was meant as a click
+        if w >= 4.0 && h >= 4.0 {
+            prm["position"] = json!([a.x.min(b.x), a.y.min(b.y)]);
+            prm["box"] = json!([w, h]);
+        }
+    }
+    if let Some(cl) = into {
+        prm["clip"] = json!(cl.0);
+    }
+    ("graphics.newText#edit".into(), prm)
+}
+
 const TEXT_EDIT_ID: &str = "gfx-text-edit";
 
 fn end_edit(app: &mut FilmcraftApp, ui: &egui::Ui) {
@@ -237,31 +400,45 @@ pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, fra
     let sel_layers = app.session.state.graphic_layers.clone();
     let editing = app.ui.gfx_edit.clone();
     // ---- boxes and handles
-    let graphics_tool = matches!(tool, Tool::Selection | Tool::Type | Tool::Rectangle | Tool::Ellipse | Tool::Pen);
+    let graphics_tool = matches!(tool, Tool::Selection | Tool::Type | Tool::VerticalType | Tool::Rectangle | Tool::Ellipse | Tool::Pen);
     if graphics_tool {
         for v in views.iter().filter(|v| Some(v.clip) == sel_clip) {
             let q = v.quad();
             let selected = sel_layers.contains(&v.layer);
             let is_edit = editing.as_ref().is_some_and(|e| e.clip == v.clip.0 && e.layer == v.layer);
-            let col = if selected || is_edit { accent } else { Color32::from_white_alpha(70) };
-            painter.add(egui::Shape::closed_line(q.to_vec(), Stroke::new(1.0, col)));
+            // only the selected layers have a box; that of the text being typed into is red, as in Premiere
+            if !(selected || is_edit) {
+                continue;
+            }
+            painter.add(egui::Shape::closed_line(q.to_vec(), Stroke::new(1.0, if is_edit { t.danger } else { accent })));
             if selected && !is_edit {
+                let paragraph = text_of(&v.spec).filter(|tp| is_paragraph(tp));
+                let label = if paragraph.is_some() { "resize handle" } else { "scale handle" };
+                // text the box hides: its bottom-right handle turns into a red plus
+                let overflow = paragraph.is_some_and(|tp| text_layout(tp).overflow);
                 for (n, c) in q.iter().enumerate() {
                     let hr = Rect::from_center_size(*c, vec2(7.0, 7.0));
-                    painter.rect_filled(hr, 0.0, Color32::WHITE);
-                    painter.rect_stroke(hr, 0.0, Stroke::new(1.0, accent), StrokeKind::Middle);
-                    app.auto.add(&format!("program.layer.{}.{}.handle.{n}", v.clip.0, v.layer), hr.expand(3.0), "scale handle");
+                    if overflow && n == 2 {
+                        painter.rect_filled(hr.expand(1.0), 0.0, t.danger);
+                        painter.line_segment([*c - vec2(3.0, 0.0), *c + vec2(3.0, 0.0)], Stroke::new(1.0, Color32::WHITE));
+                        painter.line_segment([*c - vec2(0.0, 3.0), *c + vec2(0.0, 3.0)], Stroke::new(1.0, Color32::WHITE));
+                    } else {
+                        painter.rect_filled(hr, 0.0, Color32::WHITE);
+                        painter.rect_stroke(hr, 0.0, Stroke::new(1.0, accent), StrokeKind::Middle);
+                    }
+                    app.auto.add(&format!("program.layer.{}.{}.handle.{n}", v.clip.0, v.layer), hr.expand(3.0), label);
                 }
                 for (n, m) in handle_points(&q).iter().enumerate().skip(4) {
                     let hr = Rect::from_center_size(*m, vec2(5.0, 5.0));
                     painter.rect_filled(hr, 0.0, Color32::WHITE);
-                    app.auto.add(&format!("program.layer.{}.{}.handle.{n}", v.clip.0, v.layer), hr.expand(4.0), "scale handle");
+                    app.auto.add(&format!("program.layer.{}.{}.handle.{n}", v.clip.0, v.layer), hr.expand(4.0), label);
                 }
                 // anchor point
-                let a = sp(&v.to_screen, v.spec.transform.anchor.x as f32, v.spec.transform.anchor.y as f32);
+                let a = anchor_screen(v);
                 painter.circle_stroke(a, 4.0, Stroke::new(1.0, accent));
                 painter.line_segment([a - vec2(6.0, 0.0), a + vec2(6.0, 0.0)], Stroke::new(1.0, accent));
                 painter.line_segment([a - vec2(0.0, 6.0), a + vec2(0.0, 6.0)], Stroke::new(1.0, accent));
+                app.auto.add(&format!("program.layer.{}.{}.anchor", v.clip.0, v.layer), Rect::from_center_size(a, vec2(12.0, 12.0)), "anchor point");
             }
         }
     }
@@ -275,7 +452,7 @@ pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, fra
     // cursors
     if let Some(p) = hover {
         match tool {
-            Tool::Type => ui.ctx().set_cursor_icon(egui::CursorIcon::Text),
+            Tool::Type | Tool::VerticalType => ui.ctx().set_cursor_icon(egui::CursorIcon::Text),
             Tool::Rectangle | Tool::Ellipse | Tool::Pen => ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair),
             Tool::Selection => {
                 if editing.as_ref().is_some_and(|e| views.iter().any(|v| v.clip.0 == e.clip && v.layer == e.layer && v.hit(p))) {
@@ -321,14 +498,17 @@ pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, fra
             }
         } else {
             match tool {
-                Tool::Selection | Tool::Type => {
-                    // handles of the selected layers first
-                    let handle = views
-                        .iter()
-                        .filter(|v| Some(v.clip) == sel_clip && sel_layers.contains(&v.layer))
-                        .find_map(|v| handle_points(&v.quad()).iter().position(|c| (*c - p).length() <= 7.0).map(|n| (v.clip, v.layer, n)));
-                    if let Some((c, l, n)) = handle {
-                        drag = Some(DragState { kind: DragKind::Scale(n), clip: c, layer: l, start: p });
+                Tool::Selection | Tool::Type | Tool::VerticalType => {
+                    // of the selected layers: the anchor point first (it can sit on a handle), then the handles
+                    let selected = || views.iter().filter(|v| Some(v.clip) == sel_clip && sel_layers.contains(&v.layer));
+                    let anchor = selected().find(|v| tool == Tool::Selection && (anchor_screen(v) - p).length() <= 7.0);
+                    let handle = selected().find_map(|v| handle_points(&v.quad()).iter().position(|c| (*c - p).length() <= 7.0).map(|n| (v.clip, v.layer, n)));
+                    if let Some(v) = anchor {
+                        drag = Some(DragState { kind: DragKind::Anchor, clip: v.clip, layer: v.layer, start: p });
+                    } else if let Some((c, l, n)) = handle {
+                        drag = Some(DragState { kind: DragKind::Handle(n), clip: c, layer: l, start: p });
+                    } else if tool == Tool::Type && !views.iter().any(|v| v.is_text() && v.hit(p)) {
+                        drag = Some(DragState { kind: DragKind::NewTextBox, clip: ClipId(0), layer: 0, start: p });
                     } else if tool == Tool::Selection
                         && let Some(v) = views.iter().find(|v| v.hit(p))
                     {
@@ -374,11 +554,22 @@ pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, fra
                     crate::panels::monitor_view::draw_snap_lines(&painter, pic, &snap_off.1);
                 }
             }
-            DragKind::Scale(n) => {
+            DragKind::Handle(n) => {
                 if let Some(v) = v {
-                    let h = HandleScale::new(&v.quad(), n, d.start, cur);
-                    painter.add(egui::Shape::closed_line(v.quad().iter().map(|q| h.apply(*q)).collect(), Stroke::new(1.0, Color32::WHITE)));
+                    let h = HandleDrag::new(v, n, d.start, cur);
+                    painter.add(egui::Shape::closed_line(h.quad(v).to_vec(), Stroke::new(1.0, Color32::WHITE)));
                 }
+            }
+            DragKind::Anchor => {
+                if let Some(v) = v {
+                    let a = anchor_screen(v) + (cur - d.start);
+                    painter.circle_stroke(a, 4.0, Stroke::new(1.0, Color32::WHITE));
+                    painter.line_segment([a - vec2(6.0, 0.0), a + vec2(6.0, 0.0)], Stroke::new(1.0, Color32::WHITE));
+                    painter.line_segment([a - vec2(0.0, 6.0), a + vec2(0.0, 6.0)], Stroke::new(1.0, Color32::WHITE));
+                }
+            }
+            DragKind::NewTextBox => {
+                painter.rect_stroke(Rect::from_two_pos(d.start, cur), 0.0, Stroke::new(1.0, t.danger), StrokeKind::Middle);
             }
             DragKind::NewShape => {
                 let r = Rect::from_two_pos(d.start, cur);
@@ -416,26 +607,26 @@ pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, fra
                         ));
                     }
                 }
-                DragKind::Scale(n) if moved => {
+                DragKind::Handle(n) if moved => {
                     if let Some(v) = v {
-                        // the layer scales about its anchor, so it also moves to keep the pinned side still
-                        let a = sp(&v.to_screen, v.spec.transform.anchor.x as f32, v.spec.transform.anchor.y as f32);
-                        let h = HandleScale::new(&v.quad(), n, d.start, cur);
-                        let off = h.apply(a) - a;
-                        let lin = Affine { e: 0.0, f: 0.0, ..v.canvas_to_screen };
-                        let delta = lin.inverse().map(|i| i.apply(Vec2::new(off.x as f64, off.y as f64))).unwrap_or_default();
-                        let (s, p0) = (v.spec.transform.scale, v.spec.transform.position);
-                        let mut props = json!({
-                            "scale": s.y * 100.0 * h.fy as f64,
-                            "scale_width": s.x * 100.0 * h.fx as f64,
-                            "position": [p0.x + delta.x, p0.y + delta.y],
-                        });
-                        if n >= 4 {
-                            // an edge stretches one axis only
-                            props["uniform_scale"] = json!(false);
-                        }
+                        let props = HandleDrag::new(v, n, d.start, cur).props(v, n);
                         actions.push(("graphics.set".into(), json!({"clip": v.clip.0, "layer": v.layer, "props": props})));
                     }
+                }
+                DragKind::Anchor if moved => {
+                    if let Some(v) = v {
+                        // the anchor moves over the layer; the position follows it, so the layer stays
+                        let (canvas, local) = (unscale(&v.canvas_to_screen, cur - d.start), unscale(&v.to_screen, cur - d.start));
+                        let (p0, a0) = (v.spec.transform.position, v.spec.transform.anchor);
+                        actions.push((
+                            "graphics.set".into(),
+                            json!({"clip": v.clip.0, "layer": v.layer, "props": {"position": [p0.x + canvas.x, p0.y + canvas.y], "anchor": [a0.x + local.x, a0.y + local.y]}}),
+                        ));
+                    }
+                }
+                DragKind::NewTextBox if moved => {
+                    end_edit(app, ui);
+                    actions.push(new_text_action(app, pic, frame, d.start, Some(cur)));
                 }
                 DragKind::NewShape if moved => {
                     let (into, m) = canvas_target(app, pic, frame);
@@ -461,19 +652,15 @@ pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, fra
         let in_edit = edit_view.is_some_and(|v| v.hit(p));
         match tool {
             _ if in_edit => {}
-            Tool::Type => {
+            Tool::Type | Tool::VerticalType => {
                 if let Some(v) = views.iter().find(|v| v.is_text() && v.hit(p)) {
                     start_edit_at(app, ui, v, p, &mut actions);
                 } else {
                     end_edit(app, ui);
-                    let (into, m) = canvas_target(app, pic, frame);
-                    let c = to_canvas(&m, p);
-                    let size = 100.0 * frame.1 as f64 / 1080.0;
-                    let mut prm = json!({"text": "", "position": [c.x, c.y], "size": size.round()});
-                    if let Some(cl) = into {
-                        prm["clip"] = json!(cl.0);
-                    }
-                    actions.push(("graphics.newText#edit".into(), prm));
+                    let (command, prm) = new_text_action(app, pic, frame, p, None);
+                    // vertical text is always point text: a click, never a drawn box
+                    let command = if tool == Tool::VerticalType { "graphics.newVerticalText#edit".into() } else { command };
+                    actions.push((command, prm));
                 }
             }
             Tool::Selection => {
@@ -933,6 +1120,11 @@ impl Ctx<'_> {
 }
 
 fn section(ui: &mut egui::Ui, app: &mut FilmcraftApp, name: &str, t: &Tokens) -> bool {
+    section_header(ui, app, name, t).0
+}
+
+/// A collapsible section's header row: whether the section is open, and the row.
+fn section_header(ui: &mut egui::Ui, app: &mut FilmcraftApp, name: &str, t: &Tokens) -> (bool, Rect) {
     ui.add_space(4.0);
     let key = format!("gfx:{name}");
     let open = !app.ui.collapsed_fx.contains(&key);
@@ -953,7 +1145,7 @@ fn section(ui: &mut egui::Ui, app: &mut FilmcraftApp, name: &str, t: &Tokens) ->
             app.ui.collapsed_fx.retain(|k| *k != key);
         }
     }
-    open
+    (open, r)
 }
 
 /// A small code-drawn alignment glyph (original artwork: bars against an edge line).
@@ -1197,7 +1389,28 @@ pub fn properties(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             cx.number(ui, tl!("Opacity"), "opacity", 0.5, (0.0, 100.0), 0, " %");
         }
         // ---- text
-        if e.effect == graphic::TEXT_LAYER && section(ui, app, "Text", &t) {
+        let text_open = e.effect == graphic::TEXT_LAYER && {
+            let (open, head) = section_header(ui, app, "Text", &t);
+            // Text Properties: the layer type (point / paragraph) and text styling
+            let wr = Rect::from_center_size(pos2(head.max.x - 16.0, head.center().y), vec2(22.0, 22.0));
+            let wresp = ui.interact(wr, egui::Id::new(("gfx-text-props", clip.0, l)), Sense::click());
+            icons::paint(ui.painter(), wr.shrink(4.0), Icon::Wrench, if wresp.hovered() { t.text } else { t.text_dim });
+            cx.autos.push(("graphics.textProperties".into(), wr, "Text Properties".into()));
+            if wresp.on_hover_text(tl!("Text Properties")).clicked() {
+                let flag = |id: &str| pv(e, id, mt).as_bool().unwrap_or(false);
+                let ligatures = flag("ligatures");
+                app.ui.text_props_dialog = Some(TextPropsDialog {
+                    clip: clip.0,
+                    layer: l,
+                    paragraph: pv(e, "box_width", mt).as_f64().unwrap_or(0.0) > 0.0 && !flag("vertical"),
+                    vertical: flag("vertical"),
+                    ligatures,
+                    ligatures_was: ligatures,
+                });
+            }
+            open
+        };
+        if text_open {
             // source text (multi-line), committed as it is typed
             let mut s = match pv(e, "text", mt) {
                 ParamValue::Text(s) => s,
@@ -1271,7 +1484,16 @@ pub fn properties(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             cx.number(ui, tl!("Tracking"), "tracking", 1.0, (-1000.0, 10_000.0), 0, "");
             cx.number(ui, tl!("Leading"), "leading", 0.5, (-5000.0, 5000.0), 0, "");
             cx.number(ui, tl!("Baseline Shift"), "baseline_shift", 0.5, (-5000.0, 5000.0), 0, "");
+            let vertical = pv(e, "vertical", mt).as_bool().unwrap_or(false);
+            let (_, mut vui) = cx.row(ui, tl!("Orientation"));
+            let mut value = vertical;
+            let response = vui.checkbox(&mut value, tl!("Vertical Text"));
+            cx.auto("vertical", response.rect, "Vertical Text");
+            if response.changed() {
+                cx.set("vertical", json!(value));
+            }
             cx.number(ui, tl!("Text Box Width"), "box_width", 2.0, (0.0, 100_000.0), 0, "");
+            cx.number(ui, tl!("Text Box Height"), "box_height", 2.0, (0.0, 100_000.0), 0, "");
             let (_, mut vui) = cx.row(ui, tl!("Style"));
             let flag = |id: &str| pv(e, id, mt).as_bool().unwrap_or(false);
             let caps = match pv(e, "caps", mt) {
@@ -1358,4 +1580,64 @@ pub fn properties(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             app.ui.status = e.to_string();
         }
     }
+}
+
+/// Text Properties (the wrench in the Text section): Text Layer Type and Text Styling.
+pub fn dialogs(app: &mut FilmcraftApp, ctx: &egui::Context) {
+    let Some(mut d) = app.ui.text_props_dialog.clone() else { return };
+    let mut elems: Vec<(String, Rect, &str)> = Vec::new();
+    let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+    let mut ok = false;
+    let name = |paragraph: bool| if paragraph { tl!("Paragraph Text") } else { tl!("Point Text") };
+    let id = egui::Id::new("gfx-text-properties");
+    egui::Window::new(tl!("Text Properties")).id(id).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+        ui.label(tl!("Text Layer Type"));
+        let r = egui::ComboBox::from_id_salt("gfx-text-type").selected_text(name(d.paragraph)).width(190.0).show_ui(ui, |ui| {
+            for paragraph in [false, true] {
+                // vertical text has no box to wrap in
+                let r = ui.add_enabled_ui(!(paragraph && d.vertical), |ui| ui.selectable_label(d.paragraph == paragraph, name(paragraph))).inner;
+                elems.push((format!("graphics.textProperties.type.{}", if paragraph { "paragraph" } else { "point" }), r.rect, name(paragraph)));
+                if r.clicked() {
+                    d.paragraph = paragraph;
+                }
+            }
+        });
+        elems.push(("graphics.textProperties.type".into(), r.response.rect, "Text Layer Type"));
+        ui.add_space(6.0);
+        ui.label(tl!("Text Styling"));
+        let r = ui.checkbox(&mut d.ligatures, tl!("Ligatures"));
+        elems.push(("graphics.textProperties.ligatures".into(), r.rect, "Ligatures"));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let r = ui.button(tl!("Cancel"));
+            elems.push(("graphics.textProperties.cancel".into(), r.rect, "Cancel"));
+            close |= r.clicked();
+            let r = ui.button(tl!("OK"));
+            elems.push(("graphics.textProperties.ok".into(), r.rect, "OK"));
+            ok |= r.clicked();
+        });
+    });
+    for (id, r, l) in elems {
+        app.auto.add(&id, r, l);
+    }
+    if ok {
+        let target = json!({"clip": d.clip, "layer": d.layer});
+        let mut run = |cmd: &str, extra: Value| {
+            let mut p = target.clone();
+            if let (Some(p), Some(x)) = (p.as_object_mut(), extra.as_object()) {
+                p.extend(x.clone());
+            }
+            if let Err(e) = app.session.execute(cmd, p) {
+                app.ui.status = e.to_string();
+            }
+        };
+        // a layer already of that type is left alone (no undo step)
+        run("graphics.setTextType", json!({"type": if d.paragraph { "paragraph" } else { "point" }}));
+        if d.ligatures != d.ligatures_was {
+            run("graphics.set", json!({"props": {"ligatures": d.ligatures}}));
+        }
+        // the text being typed into may have been rewritten
+        app.ui.gfx_edit = None;
+    }
+    app.ui.text_props_dialog = if ok || close { None } else { Some(d) };
 }

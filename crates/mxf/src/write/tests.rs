@@ -316,3 +316,26 @@ fn truncated_and_mutated_files_never_panic() {
         }
     }
 }
+
+/// #210 review: a whole-clip read of long stereo PCM (more samples than the old fixed
+/// 16 777 216-sample request cap, about 175 s at 48 kHz) must work; only reads far past the stored
+/// essence are refused.
+#[test]
+fn long_pcm_reads_backed_by_the_file_are_not_capped() {
+    let frames = 200 * 48_000;
+    let samples: Vec<i32> = (0..frames * 2).map(|k| (k % 60_000) as i32 - 30_000).collect();
+    let opts = OpAtomPcm { sample_rate: 48_000, bits: 16, channels: 2, edit_rate: None, ids: PackageIds::from_seed("long", "Long"), timecode: None };
+    let f = write_opatom_pcm(&opts, &samples).unwrap();
+    let m = open(&f).unwrap();
+    assert_eq!(m.tracks[0].stored_sample_frames(), frames as u64);
+    // a little past the end is zero padding, as before
+    let pcm = m.read_pcm(&f, 0, 0, frames + 10).unwrap();
+    assert_eq!((pcm.len(), pcm[0].len()), (2, frames + 10));
+    for k in [0, 1, frames / 2, frames - 1] {
+        assert_eq!(pcm[0][k], samples[2 * k] as f32 / 32768.0, "frame {k}");
+        assert_eq!(pcm[1][k], samples[2 * k + 1] as f32 / 32768.0, "frame {k}");
+    }
+    assert_eq!(pcm[0][frames..], [0.0; 10]);
+    // a request that is mostly not backed by data is refused before allocating
+    assert!(m.read_pcm(&f, 0, 0, frames + (1 << 24)).is_err());
+}

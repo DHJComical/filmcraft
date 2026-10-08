@@ -71,8 +71,20 @@ pub(crate) struct Pipeline {
 impl Pipeline {
     pub fn new(project: Arc<Project>, seq: ItemId, settings: &ExportSettings, hdr_out: bool) -> Result<Self> {
         let q = project.sequence(seq).ok_or(ExportError::NoSequence)?;
+        q.settings.validate().map_err(ExportError::Unsupported)?;
+        settings.validate()?;
         let r = settings.resolve(q.settings.width, q.settings.height, q.settings.frame_rate, q.settings.sample_rate);
+        filmcraft_project::validate_frame_size(r.width, r.height).map_err(ExportError::Unsupported)?;
         let geom = Geometry::new(settings, q.settings.width, q.settings.height, r.width, r.height);
+        if let Some((w, h)) = geom.content {
+            let w = u32::try_from(w).map_err(|_| ExportError::Unsupported("scaled picture width is too large".into()))?;
+            let h = u32::try_from(h).map_err(|_| ExportError::Unsupported("scaled picture height is too large".into()))?;
+            filmcraft_project::validate_frame_size(w, h).map_err(ExportError::Unsupported)?;
+        }
+        let (w, h) = filmcraft_render::output_size(q, geom.render_scale);
+        let w = u32::try_from(w).map_err(|_| ExportError::Unsupported("rendered picture width is too large".into()))?;
+        let h = u32::try_from(h).map_err(|_| ExportError::Unsupported("rendered picture height is too large".into()))?;
+        filmcraft_project::validate_frame_size(w, h).map_err(ExportError::Unsupported)?;
         let pipe = q.settings.color;
         let out_tf = hdr_out.then(|| filmcraft_color::OutputTransform::new(&pipe, pipe.working.output_space()));
         let opts = RenderOptions { scale: geom.render_scale, captions: settings.burn_captions, working_output: hdr_out, ..Default::default() };
@@ -118,9 +130,13 @@ impl Pipeline {
             if lim.enabled {
                 limit_f32(&mut out, lim.min_percent, lim.max_percent);
             }
+            // the float image is not needed any more: its buffer serves the next frame's layers
+            filmcraft_frame::pool::recycle_f32(img.px);
             return (Vec::new(), out);
         }
         let mut rgba = img.over_black_rgba8();
+        // the float image is not needed any more: its buffer serves the next frame's layers
+        filmcraft_frame::pool::recycle_f32(img.px);
         if lim.enabled {
             limit_rgba8(&mut rgba, lim.min_percent, lim.max_percent);
         }

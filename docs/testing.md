@@ -66,7 +66,16 @@ are never linked or shipped ([AGENTS.md](../AGENTS.md) §2).
   the matrix.
 - Fixture sources are synthetic: `testsrc2`, `mandelbrot`, SMPTE bars, noise and fades, sine tones.
   H.264 and HEVC fixtures need ffmpeg built with libx264 and libx265. VideoToolbox fixtures are
-  generated only on macOS.
+  generated only on macOS. The Media Foundation parity tests (`crates/platform/tests/media_foundation.rs`,
+  Windows only) make their 640x360, 1080p and 2160p H.264 / HEVC / Main 10 fixtures with ffmpeg and skip
+  without a Direct3D 11 video device or the HEVC / VP9 / AV1 codec extensions of the Microsoft Store. The VP9 and
+  AV1 fixtures (libvpx-vp9, libaom-av1; 360p, 1080p, 2160p, hidden alt-ref frames, two GOPs) need an ffmpeg with those encoders.
+
+The NVENC tests (`crates/platform/tests/nvenc.rs` and `nvenc_export.rs`, Windows only) skip without an
+NVIDIA GPU with NVENC. The FFI layout tests in `crates/platform/src/nvenc/abi_tests.rs` were generated
+from a C program built with MSVC against NVIDIA's MIT-licensed `nvEncodeAPI.h` (12.1); to regenerate
+them, print the sizes, alignments, offsets, constants and GUIDs of `src/nvenc/ffi.rs` from that
+program and update the asserts.
 
 ### Pass criteria per codec
 

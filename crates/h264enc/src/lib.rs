@@ -381,11 +381,13 @@ impl Encoder {
             (RateControl::Cbr { kbps }, Pass::First) => (Some(*kbps), RcKind::Abr { kbps: *kbps }, (None, None)),
             (RateControl::Cbr { kbps }, Pass::Single) => (Some(*kbps), RcKind::Abr { kbps: *kbps }, (Some(*kbps), Some(*kbps))),
             (RateControl::Vbr { target_kbps, max_kbps }, Pass::Second(st)) => {
-                (Some(*max_kbps), ratecontrol::RateControl::plan_two_pass(st, *target_kbps), (Some(*max_kbps), Some(max_kbps * 2)))
+                let buffer = max_kbps.checked_mul(2).ok_or_else(|| Error::InvalidConfig("VBR buffer rate exceeds the supported integer range".into()))?;
+                (Some(*max_kbps), ratecontrol::RateControl::plan_two_pass(st, *target_kbps), (Some(*max_kbps), Some(buffer)))
             }
             (RateControl::Vbr { target_kbps, max_kbps }, Pass::First) => (Some(*max_kbps), RcKind::Abr { kbps: *target_kbps }, (None, None)),
             (RateControl::Vbr { target_kbps, max_kbps }, Pass::Single) => {
-                (Some(*max_kbps), RcKind::Abr { kbps: *target_kbps }, (Some(*max_kbps), Some(max_kbps * 2)))
+                let buffer = max_kbps.checked_mul(2).ok_or_else(|| Error::InvalidConfig("VBR buffer rate exceeds the supported integer range".into()))?;
+                (Some(*max_kbps), RcKind::Abr { kbps: *target_kbps }, (Some(*max_kbps), Some(buffer)))
             }
         };
         if matches!(cfg.rate, RateControl::Cbr { kbps: 0 } | RateControl::Vbr { target_kbps: 0, .. }) {

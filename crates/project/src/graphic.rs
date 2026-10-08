@@ -125,6 +125,7 @@ pub(crate) fn layer_defs() -> Vec<EffectDef> {
                 chc("caps", "Capitalisation", CAPS_OPTS, 0, X),
                 bo("underline", "Underline", false, X),
                 fl("box_width", "Text Box Width", 0.0, (0.0, 100_000.0), (0.0, 3840.0), "", X),
+                fl("box_height", "Text Box Height", 0.0, (0.0, 100_000.0), (0.0, 2160.0), "", X),
                 bo("vertical", "Vertical Text", false, X),
             ],
         ),
@@ -192,8 +193,10 @@ pub struct TextProps {
     /// 0 normal, 1 all caps, 2 small caps.
     pub caps: u32,
     pub underline: bool,
-    /// Area-text width (0 = point text).
+    /// Paragraph-text box width (0 = point text).
     pub box_width: f32,
+    /// Paragraph-text box height: lines that do not fit are not shown (0 = as tall as the text).
+    pub box_height: f32,
     /// Vertical text (characters stacked top to bottom; columns right to left).
     pub vertical: bool,
     /// Per-character style overrides as *byte* ranges of `text` (sorted, non-overlapping).
@@ -286,6 +289,7 @@ pub fn eval_layer(e: &EffectInstance, t: Tick, frame: (u32, u32)) -> Option<Laye
                 caps: ch(e, "caps", t),
                 underline: bb(e, "underline", t),
                 box_width: ff(e, "box_width", t).max(0.0),
+                box_height: ff(e, "box_height", t).max(0.0),
                 vertical: bb(e, "vertical", t),
             }
         }),
@@ -393,7 +397,7 @@ pub fn new_vertical_text_layer(text: &str, position: Vec2, size: f64) -> EffectI
 /// Reset a layer's parameters to their defaults, keeping its content (name, text, shape kind,
 /// geometry and path) — Graphics ▸ Reset All Parameters.
 pub fn reset_layer_params(e: &mut EffectInstance) {
-    const KEEP: &[&str] = &["name", "text", "shape", "size", "sides", "points", "vertical"];
+    const KEEP: &[&str] = &["name", "text", "shape", "size", "sides", "points", "vertical", "box_width", "box_height"];
     let Some(def) = crate::effect::find_effect(&e.effect) else { return };
     let mut fresh = def.instance();
     for k in KEEP {

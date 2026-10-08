@@ -17,6 +17,7 @@
 //! | `project.freeform.saveArrangement` / `.restoreArrangement` / `.arrangements` / `.deleteArrangement` | saved arrangements |
 //! | `project.freeform.options` | Freeform View Options… (grid, snap, names, durations) |
 //! | `project.renameBin` | rename a bin (inline rename, undoable) |
+//! | `project.selectAll` / `project.deselectAll` | select every item in the project / clear the Project panel selection (Cmd+A / Cmd+Shift+A with the panel focused) |
 
 use std::collections::BTreeMap;
 
@@ -1222,5 +1223,13 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             freeform_options,
         ),
         c("project.renameBin", "Rename Bin", r#"{"bin":binId,"name":str}"#, always, rename_bin),
+        c("project.selectAll", "Select All Project Items", "{}", always, |s, _| {
+            s.state.project_selection = s.project.items.keys().copied().collect();
+            Ok(json!({"selected": s.state.project_selection.len()}))
+        }),
+        c("project.deselectAll", "Deselect All Project Items", "{}", always, |s, _| {
+            s.state.project_selection.clear();
+            Ok(Value::Null)
+        }),
     ]
 }

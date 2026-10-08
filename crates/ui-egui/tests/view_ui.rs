@@ -281,7 +281,8 @@ fn snap_in_program_monitor_and_graphics_menu() {
         let pic = d.rect("program.picture");
         let k = pic[2] / 1920.0;
         let lr = d.rect(&format!("program.layer.{clip}.0"));
-        let (x, y) = (lr[0] + lr[2] / 2.0, lr[1] + lr[3] / 2.0);
+        // off the centre: there the anchor point is picked, and dragging it moves it alone
+        let (x, y) = (lr[0] + lr[2] / 4.0, lr[1] + lr[3] / 2.0);
         d.ok("ui.drag", json!({"from": {"x": x, "y": y}, "to": {"x": x + frame_dx * k + extra, "y": y}, "steps": 8}));
         d.frames(2);
     };

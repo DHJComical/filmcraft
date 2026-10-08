@@ -105,13 +105,21 @@ fn assign(app: &mut FilmcraftApp, command: &str, keys: &str, add: bool) {
     }
 }
 
-/// Take the next key press while recording (Esc cancels).
+/// A modifier key on its own. egui reports pressing Shift, Ctrl, Alt or the Windows / Cmd key as a
+/// key event of its own, before the key it modifies arrives (#164).
+fn is_modifier_key(key: egui::Key) -> bool {
+    use egui::Key::*;
+    matches!(key, ShiftLeft | ShiftRight | ControlLeft | ControlRight | AltLeft | AltRight | SuperLeft | SuperRight)
+}
+
+/// Take the next key press while recording (Esc cancels). Modifier keys on their own are skipped:
+/// the chord is recorded when the key they modify is pressed, with them as its modifiers.
 fn record(app: &mut FilmcraftApp, ctx: &egui::Context) {
     let Some((cmd, add)) = app.shortcut_editor.recording.clone() else { return };
     let got = ctx.input_mut(|i| {
         let mut got = None;
         i.events.retain(|e| match e {
-            egui::Event::Key { key, pressed: true, modifiers, .. } if got.is_none() => {
+            egui::Event::Key { key, pressed: true, modifiers, .. } if got.is_none() && !is_modifier_key(*key) => {
                 got = Some((*key, *modifiers));
                 false
             }

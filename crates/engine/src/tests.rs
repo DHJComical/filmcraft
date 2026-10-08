@@ -1,4 +1,16 @@
 use super::*;
+
+#[test]
+fn invalid_preview_scales_are_rejected_without_allocating() {
+    let mut s = Session::default();
+    s.execute("file.newSequence", serde_json::json!({"width":160,"height":90})).unwrap();
+    for scale in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::MAX] {
+        assert!(s.render_program(scale).is_none());
+        assert!(s.render_program_working(scale).is_none());
+    }
+    assert!(s.try_render_program_at(f32::NAN, Tick::ZERO).unwrap_err().to_string().contains("finite"), "the reason is reported");
+    assert_eq!(s.render_program(0.5).unwrap().w, 80);
+}
 use serde_json::json;
 
 fn demo() -> Session {
@@ -93,6 +105,43 @@ fn slide_moves_linked_audio_with_the_video() {
     let a = q.audio_tracks[0].items.iter().find(|i| i.link == v.link).unwrap();
     assert_eq!(nv.start, v.start + s.sequence_rate().tick_of(5));
     assert_eq!((a.start, a.source_in), (nv.start, nv.source_in), "linked audio slides too and stays in sync");
+}
+
+#[test]
+fn sequence_parameters_are_bounded_and_failed_changes_are_atomic() {
+    let mut s = demo();
+    let before = (*s.project).clone();
+    let history = s.history.undo.len();
+    for command in ["file.newSequence", "sequence.settings"] {
+        for params in [
+            json!({"width":0}),
+            json!({"height":0}),
+            json!({"sampleRate":0}),
+            json!({"width":4_294_967_360_u64}),
+            json!({"height":u64::MAX}),
+            json!({"sampleRate":u64::MAX}),
+            json!({"width":-1}),
+            json!({"width":1.5}),
+            json!({"width":32768,"height":16384}),
+            json!({"width":1920.25}),
+            json!({"fps":1001}),
+            json!({"sampleRate":384001}),
+        ] {
+            assert!(s.execute(command, params.clone()).is_err(), "{command} {params}");
+            assert_eq!(*s.project, before);
+            assert_eq!(s.history.undo.len(), history);
+        }
+    }
+    for params in [json!({"video":u64::MAX}), json!({"audio":u64::MAX}), json!({"video":257}), json!({"audio":-1})] {
+        assert!(s.execute("file.newSequence", params.clone()).is_err(), "{params}");
+        assert_eq!(*s.project, before);
+    }
+    s.execute("file.newSequence", json!({"width":7680,"height":4320,"video":0,"audio":0})).unwrap();
+    assert_eq!(s.active_sequence().unwrap().settings.width, 7680, "standard 8K remains supported");
+    s.execute("file.newSequence", json!({"width":15360.0,"height":8640.0,"sampleRate":48000.0,"video":1.0,"audio":0})).unwrap();
+    assert_eq!(s.active_sequence().unwrap().settings.width, 15360, "16K, and integer-valued floats, are accepted");
+    s.execute("sequence.settings", json!({"width":16384,"height":8192})).unwrap();
+    assert_eq!(s.active_sequence().unwrap().settings.height, 8192, "a 16384x8192 panorama is accepted");
 }
 
 #[test]
@@ -414,4 +463,69 @@ fn fps_validation_keeps_real_rates_and_refuses_degenerate_ones() {
     assert!(s.execute("sequence.settings", json!({"fps": -0.0})).is_err());
     assert_eq!(s.sequence_rate(), before);
     assert_eq!(s.execute("project.inspect", json!({})).unwrap().to_string().len(), n, "no sequence was created");
+}
+
+/// #164: with a clip selected, Q/W trim only its tracks (and its linked sound), not every
+/// targeted track under the playhead (the music on A2 used to be cut too).
+#[test]
+fn ripple_trim_to_playhead_follows_the_selection() {
+    let mut s = demo_unlocked();
+    let rate = s.sequence_rate();
+    let a2 = |s: &Session| s.active_sequence().unwrap().audio_tracks[1].items.iter().map(|i| (i.start, i.duration)).collect::<Vec<_>>();
+    let music = a2(&s);
+    assert!(!music.is_empty(), "the demo has music on A2");
+    let (id, start, _) = v1(&s)[1];
+    s.execute("timeline.select", json!({"clips": [id]})).unwrap();
+    let ph = start + rate.tick_of(10);
+    s.execute("playhead.set", json!({"time": ph.0})).unwrap();
+    s.execute("trim.rippleNext", json!({})).unwrap();
+    assert_eq!(v1(&s).into_iter().find(|c| c.0 == id).unwrap().2, ph, "the selected clip ends at the playhead");
+    assert_eq!(a2(&s), music, "the music on A2 is untouched");
+    let linked = s.active_sequence().unwrap().audio_tracks[0].items.iter().find(|i| i.start == start).map(|i| i.end());
+    assert_eq!(linked, Some(ph), "its linked sound on A1 is trimmed with it");
+}
+
+#[test]
+fn empty_items_do_not_panic_keyframe_commands() {
+    let mut s = demo();
+    let seq = s.state.active_sequence.unwrap();
+    let clip = {
+        let item = &mut std::sync::Arc::make_mut(&mut s.project).sequence_mut(seq).unwrap().video_tracks[0].items[0];
+        item.duration = Tick::ZERO;
+        item.id
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        s.execute("effects.toggleAnimation", json!({"clip":clip.0,"effect":"motion","param":"position"}))
+    }));
+    assert!(result.is_ok(), "an empty clip must not supply reversed clamp bounds");
+    let error = result.unwrap().unwrap_err();
+    assert!(error.to_string().contains("non-positive duration"), "expected the ordinary invariant error, got: {error}");
+}
+
+/// #201: a drag of an effect parameter (`merge`, starting with `begin`) is one undo step, and the
+/// next drag is another.
+#[test]
+fn dragging_an_effect_parameter_is_one_undo_step() {
+    let mut s = demo_unlocked();
+    let id = v1(&s)[0].0;
+    let opacity = |s: &Session| {
+        let q = s.active_sequence().unwrap();
+        let it = q.find_item(ClipId(id)).unwrap().1;
+        let e = it.effects.iter().find(|e| e.effect == "opacity").unwrap();
+        e.params["opacity"].value.as_f64().unwrap()
+    };
+    let start = opacity(&s);
+    let set = |s: &mut Session, v: f64, begin: bool| {
+        s.execute("effects.setParam", json!({"clip": id, "effect": "opacity", "param": "opacity", "value": v, "merge": true, "begin": begin})).unwrap();
+    };
+    set(&mut s, 90.0, true);
+    set(&mut s, 70.0, false);
+    set(&mut s, 30.0, false);
+    set(&mut s, 50.0, true); // a second drag
+    set(&mut s, 60.0, false);
+    assert_eq!(opacity(&s), 60.0);
+    s.undo();
+    assert_eq!(opacity(&s), 30.0, "undo takes back the whole second drag");
+    s.undo();
+    assert_eq!(opacity(&s), start, "and then the whole first one");
 }

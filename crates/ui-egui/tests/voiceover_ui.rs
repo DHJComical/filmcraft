@@ -75,6 +75,23 @@ impl Driver {
 }
 
 #[test]
+fn a_failed_take_can_be_discarded_from_the_settings_dialog() {
+    let mut d = Driver::demo();
+    d.exec("audio.voiceover.start", json!({"track":"A1","time":0,"preroll":0}));
+    let blocker = std::env::temp_dir().join(format!("filmcraft-voiceover-ui-blocker-{}", std::process::id()));
+    std::fs::write(&blocker, b"not a directory").unwrap();
+    let failure = d.call("engine.execute", json!({"command":"audio.voiceover.stop","params":{"seconds":1,"dir":blocker}}));
+    assert_eq!(failure["ok"], false);
+    assert!(d.harness.state().session.voiceover.recording());
+    d.ok("ui.menu.invoke", json!({"id":"voiceover.settingsDialog"}));
+    d.frames(4); // Allow the newly anchored window to settle before using its button rectangle.
+    d.click("voiceover.discard");
+    assert!(!d.harness.state().session.voiceover.recording(), "{}", d.harness.state().ui.status);
+    d.exec("file.newProject", json!({}));
+    std::fs::remove_file(blocker).unwrap();
+}
+
+#[test]
 fn settings_dialog_from_the_track_header_persists_on_ok() {
     let mut d = Driver::demo();
     assert!(d.ids("timeline.track.A1.voiceover").contains(&"timeline.track.A1.voiceover".to_string()));

@@ -87,6 +87,9 @@ pub struct ParagraphStyle {
     pub leading: f32,
     /// Wrap width (area text); None = point text.
     pub width: Option<f32>,
+    /// Box height (area text only): lines that end below it are left out, except the first.
+    /// None = as tall as the text.
+    pub height: Option<f32>,
     /// Base direction: None = from the first strong character.
     pub rtl: Option<bool>,
     /// Vertical text: characters stack top to bottom, paragraphs are columns laid out right to
@@ -114,6 +117,7 @@ impl Hash for ParagraphStyle {
         self.align.hash(h);
         hf(h, self.leading);
         self.width.map(f32::to_bits).hash(h);
+        self.height.map(f32::to_bits).hash(h);
         self.rtl.hash(h);
         self.vertical.hash(h);
     }
@@ -211,6 +215,8 @@ pub struct Layout {
     pub bounds: [f32; 4],
     /// The face requested was missing (substituted).
     pub missing_font: bool,
+    /// Lines were left out because they do not fit the box height.
+    pub overflow: bool,
     pub text_len: usize,
     /// Laid out vertically (one line per character; columns right to left).
     pub vertical: bool,
@@ -632,10 +638,15 @@ pub fn layout_rich_uncached(text: &str, style: &TextStyle, runs: &[StyleRun], pa
     };
     let mut baseline = first_baseline;
     let mut prev_desc = 0.0f32;
+    let box_h = para.width.and(para.height);
     for (i, pl) in plines.into_iter().enumerate() {
         if i > 0 {
             // rich text: a line holding a larger run pushes its baseline down
             baseline += if rich { line_h.max(prev_desc + pl.ascent + para.leading) } else { line_h };
+            if box_h.is_some_and(|h| baseline + pl.descent > h + 0.01) {
+                lay.overflow = true;
+                break;
+            }
         }
         prev_desc = pl.descent;
         let shift = match (para.width, para.align) {
@@ -687,6 +698,11 @@ pub fn layout_rich_uncached(text: &str, style: &TextStyle, runs: &[StyleRun], pa
     }
     if let (Some(first), Some(last)) = (lay.lines.first(), lay.lines.last()) {
         lay.bounds = [x0, first.baseline - first.ascent, x1.max(x0), last.baseline + last.descent];
+    }
+    if let Some(h) = box_h {
+        // a sized box is its own bounds, however much text it holds
+        lay.bounds[1] = 0.0;
+        lay.bounds[3] = h.max(0.0);
     }
     lay
 }
@@ -837,6 +853,33 @@ mod tests {
         }
         let left = layout("the quick brown fox jumps over the lazy dog", &st(40.0), &ParagraphStyle { width: Some(300.0), ..Default::default() });
         assert!(left.lines.iter().all(|l| l.width <= 300.0 + 0.01));
+    }
+
+    #[test]
+    fn a_box_height_leaves_out_the_lines_that_do_not_fit() {
+        let text = "the quick brown fox jumps over the lazy dog again and again";
+        let free = layout(text, &st(40.0), &ParagraphStyle { width: Some(300.0), ..Default::default() });
+        assert!(free.lines.len() >= 3 && !free.overflow);
+        // room for two lines only
+        let h = free.lines[1].baseline + free.lines[1].descent + 1.0;
+        let boxed = layout(text, &st(40.0), &ParagraphStyle { width: Some(300.0), height: Some(h), ..Default::default() });
+        assert_eq!(boxed.lines.len(), 2);
+        assert!(boxed.overflow);
+        assert_eq!(boxed.lines[..], free.lines[..2]);
+        assert_eq!(boxed.glyphs.len(), free.lines[1].glyphs.end);
+        assert_eq!(boxed.bounds, [0.0, 0.0, 300.0, h], "the box is the bounds");
+        assert_eq!(boxed.text_len, text.len());
+        // a box tall enough for everything hides nothing; a box too short for one line keeps the first
+        let tall = layout(text, &st(40.0), &ParagraphStyle { width: Some(300.0), height: Some(5000.0), ..Default::default() });
+        assert_eq!(tall.lines.len(), free.lines.len());
+        assert!(!tall.overflow);
+        let tiny = layout(text, &st(40.0), &ParagraphStyle { width: Some(300.0), height: Some(2.0), ..Default::default() });
+        assert_eq!(tiny.lines.len(), 1);
+        assert!(tiny.overflow);
+        // point text has no box: the height is ignored
+        let point = layout("a\nb\nc", &st(40.0), &ParagraphStyle { height: Some(2.0), ..Default::default() });
+        assert_eq!(point.lines.len(), 3);
+        assert!(!point.overflow);
     }
 
     #[test]

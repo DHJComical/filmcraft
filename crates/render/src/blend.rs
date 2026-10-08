@@ -241,11 +241,25 @@ fn hash2(x: usize, y: usize) -> f32 {
 /// Composite `src` over `dst` (same size) with `opacity` and `mode`.
 pub fn composite(dst: &mut Image, src: &Image, opacity: f32, mode: Blend) {
     debug_assert_eq!((dst.w, dst.h), (src.w, src.h));
-    let w = dst.w;
-    dst.px.par_chunks_mut(w * 4).zip(src.px.par_chunks(w * 4)).enumerate().for_each(|(y, (d, s))| {
-        for x in 0..w {
-            let i = x * 4;
-            let mut sp = [s[i] * opacity, s[i + 1] * opacity, s[i + 2] * opacity, s[i + 3] * opacity];
+    composite_at(dst, src, 0, 0, opacity, mode);
+}
+
+/// [`composite`] for a `src` that is only a rectangle of its layer, with its top-left corner at
+/// (`x0`, `y0`) of `dst`. The rest of the layer is transparent, which leaves `dst` as it is, so only
+/// the rectangle is visited; its pixels are mixed exactly as [`composite`] mixes them (the dissolve
+/// pattern follows the pixel's place in `dst`). The part of the rectangle outside `dst` is ignored.
+pub fn composite_at(dst: &mut Image, src: &Image, x0: usize, y0: usize, opacity: f32, mode: Blend) {
+    let (cw, ch) = (src.w.min(dst.w.saturating_sub(x0)), src.h.min(dst.h.saturating_sub(y0)));
+    if cw == 0 || ch == 0 || src.px.len() != src.w * src.h * 4 {
+        return;
+    }
+    let dw = dst.w;
+    dst.px.par_chunks_mut(dw * 4).skip(y0).take(ch).zip(src.px.par_chunks(src.w * 4)).enumerate().for_each(|(ry, (d, s))| {
+        let y = y0 + ry;
+        for rx in 0..cw {
+            let x = x0 + rx;
+            let (i, j) = (x * 4, rx * 4);
+            let mut sp = [s[j] * opacity, s[j + 1] * opacity, s[j + 2] * opacity, s[j + 3] * opacity];
             let sa = sp[3];
             if sa <= 0.0 {
                 continue;

@@ -27,12 +27,16 @@ SUBCOMMANDS
   inspect [project|sequence]    project tree or active sequence as JSON (default: both)
   import <file>...              import media into the project
   export <out> [--preset name] [--format f] [--range r] [--start s --end s] [--settings json]
+         [--scale f] [--quality 0-100] [--no-audio] [--queue]
                                 export the active sequence and wait for it to finish: with an
                                 export preset (`export --list-presets`; built-in or the user's), or
-                                a format (h264|prores|dnxhr|mjpeg|mxf-op1a|mxf-opatom|png|tiff|bmp|gif|wav|aiff, guessed
+                                a format (h264|hevc|prores|dnxhr|apv|mjpeg|mxf-op1a|mxf-opatom|png|tiff|bmp|gif|wav|aiff, guessed
                                 from the extension); --range entire|inOut|workArea, or a custom
                                 range in seconds; --settings is ExportSettings JSON merged over the
-                                preset; --queue adds to the export queue and runs it instead
+                                preset; --scale renders at a fraction of the frame size (0.5 =
+                                half); --quality 0-100 for the formats that take one; --no-audio
+                                leaves the sound out; --queue adds to the export queue and runs it
+                                instead
   export --list-presets [query] list export presets (name, category, format) as JSON
   render --seconds S --out f.png [--scale 0.5]   render one Program frame to PNG
   probe <media> [--image-sequence]
@@ -105,7 +109,8 @@ impl Backend {
     async fn exec(&mut self, id: &str, params: Value) -> Result<Value, String> {
         match self {
             Backend::Local(s) => s.execute(id, params).map_err(|e| e.to_string()),
-            Backend::Bridge(b) => b.call("engine.execute", json!({"command": id, "params": params})).await.map_err(|e| e.to_string()),
+            // a blocking export runs as an app job polled by the client (#91, #92)
+            Backend::Bridge(b) => b.execute(id, params).await.map_err(|e| e.to_string()),
         }
     }
 
@@ -149,14 +154,19 @@ fn format_for(path: &str) -> Option<&'static str> {
     })
 }
 
+/// OS hardware video decoders (VideoToolbox on macOS, Media Foundation on Windows) in front of our
+/// own, as in the desktop app. Also what `mcp` and the headless commands decode with.
+fn register_hardware_decoders() -> filmcraft_platform::Availability {
+    filmcraft_platform::register()
+}
+
 #[tokio::main]
 async fn main() {
     if matches!(std::env::args().nth(1).as_deref(), Some("--version" | "-V")) {
         println!("filmcraft-cli {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    // OS hardware video decoders (VideoToolbox on macOS) in front of our own, as in the desktop app.
-    let _ = filmcraft_platform::register();
+    register_hardware_decoders();
     let a = Args::parse(std::env::args().skip(1));
     let Some(cmd) = a.pos(0) else { usage("missing subcommand") };
     match cmd {
@@ -373,6 +383,14 @@ async fn main() {
 
 #[cfg(test)]
 mod format_tests {
+    /// The CLI (and MCP / headless runs, which share its entry point) registers the hardware
+    /// decoders at start-up.
+    #[test]
+    fn startup_registers_the_hardware_decoders() {
+        let hardware = super::register_hardware_decoders();
+        assert_eq!(filmcraft_platform::registered(), cfg!(any(target_os = "macos", target_os = "windows")), "{hardware:?}");
+    }
+
     #[test]
     fn export_format_from_extension() {
         assert_eq!(super::format_for("out/clip.MXF"), Some("mxf-op1a"));

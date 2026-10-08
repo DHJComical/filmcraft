@@ -223,11 +223,11 @@ pub struct EssenceTrack {
 impl EssenceTrack {
     /// First presented edit unit (stored position of the material package's zero point).
     pub fn first_edit_unit(&self) -> i64 {
-        (self.origin + self.start_position).max(0)
+        self.origin.saturating_add(self.start_position).max(0)
     }
     /// Total sound sample frames stored.
     pub fn stored_sample_frames(&self) -> u64 {
-        self.chunks.last().map_or(0, |c| c.first_sample + c.samples)
+        self.chunks.last().map_or(0, |c| c.first_sample.saturating_add(c.samples))
     }
     /// Sound sample frames per edit unit (rational), e.g. 48000/25.
     pub fn samples_per_edit_unit(&self) -> (i64, i64) {
@@ -296,6 +296,8 @@ struct WalkResult {
 
 /// Values larger than this are never read while opening (metadata and index values are small).
 const MAX_META_VALUE: u64 = 64 << 20;
+/// Samples (frames x channels) of zero padding `read_pcm` will produce past the stored essence.
+const PCM_PAD_FRAMES_LIMIT: usize = 1 << 24;
 
 /// Buffered reads of KLV headers.
 struct Window<'a, S: ByteSource + ?Sized> {
@@ -749,24 +751,21 @@ pub fn open(src: &(impl ByteSource + ?Sized)) -> Result<MxfFile> {
 }
 
 /// Index entries per stored edit unit for an index SID (all segments when `sid` is 0 or unmatched).
-fn index_entries(index: &[IndexSegment], sid: u32) -> (Vec<Option<IndexEntry>>, u32) {
+fn index_entries(index: &[IndexSegment], sid: u32) -> (std::collections::BTreeMap<usize, IndexEntry>, u32) {
     let any = index.iter().any(|s| s.index_sid == sid);
     let segs: Vec<&IndexSegment> = index.iter().filter(|s| !any || s.index_sid == sid).collect();
-    let mut out: Vec<Option<IndexEntry>> = Vec::new();
+    // ST 377-1 segments use absolute edit-unit positions, which need not start at zero.
+    // Keep positions sparse so even hostile gaps allocate only for real (already parsed) entries.
+    let mut out = std::collections::BTreeMap::new();
     let mut eubc = 0;
     for s in segs {
         if s.edit_unit_byte_count > 0 {
             eubc = s.edit_unit_byte_count;
         }
         for (k, e) in s.entries.iter().enumerate() {
-            let Ok(p) = usize::try_from(s.start_position + k as i64) else { continue };
-            if p > 50_000_000 {
-                break;
-            }
-            if out.len() <= p {
-                out.resize(p + 1, None);
-            }
-            out[p] = Some(*e);
+            let Some(position) = s.start_position.checked_add(k as i64) else { break };
+            let Ok(p) = usize::try_from(position) else { continue };
+            out.insert(p, *e);
         }
     }
     (out, eubc)
@@ -872,7 +871,7 @@ fn build_pictures(
     warnings: &mut Vec<String>,
 ) -> Result<()> {
     let (entries, eubc) = index_entries(index, t.index_sid);
-    let expected = t.duration.map(|d| (d + t.first_edit_unit()).max(0) as usize);
+    let expected = t.duration.map(|d| d.saturating_add(t.first_edit_unit()).max(0) as usize);
     let clip = elements.len() == 1 && expected.is_none_or(|n| n > 1) && (eubc > 0 || entries.len() > 1);
     let mut samples: Vec<Sample> = Vec::new();
     if clip {
@@ -884,7 +883,8 @@ fn build_pictures(
                 samples.push(Sample { offset: e.value_offset + i * eubc as u64, size: eubc, pts: i as i64, key: true, b_picture: false });
             }
         } else {
-            let offs: Vec<u64> = entries.iter().map_while(|x| x.map(|x| x.stream_offset)).collect();
+            let offs: Vec<u64> =
+                entries.iter().enumerate().map_while(|(position, (&indexed, entry))| (position == indexed).then_some(entry.stream_offset)).collect();
             let base = offs.first().copied().unwrap_or(0);
             for (i, o) in offs.iter().enumerate() {
                 let start = o - base.min(*o);
@@ -902,12 +902,12 @@ fn build_pictures(
     }
     let n = samples.len();
     // Key frames and B pictures from the index.
-    let flagged = entries.iter().flatten().any(|e| e.random_access());
+    let flagged = entries.values().any(|e| e.random_access());
     if !t.codec.intra_only() {
         if flagged {
             t.indexed = true;
             for (i, s) in samples.iter_mut().enumerate() {
-                let e = entries.get(i).copied().flatten();
+                let e = entries.get(&i).copied();
                 s.key = e.is_some_and(|e| e.random_access()) || i == 0;
                 s.b_picture = e.is_some_and(|e| e.is_b());
             }
@@ -924,12 +924,12 @@ fn build_pictures(
     }
     // Presentation order from the temporal offsets: display d is stored at d + TO[d].
     let mut display: Vec<usize> = (0..n).collect();
-    let has_to = entries.iter().take(n).flatten().any(|e| e.temporal_offset != 0);
+    let has_to = entries.range(..n).any(|(_, e)| e.temporal_offset != 0);
     if has_to {
         let mut pts = vec![i64::MIN; n];
         let mut ok = true;
         for d in 0..n {
-            let to = entries.get(d).copied().flatten().map_or(0, |e| e.temporal_offset as i64);
+            let to = entries.get(&d).copied().map_or(0, |e| e.temporal_offset as i64);
             let s = d as i64 + to;
             if s < 0 || s >= n as i64 || pts[s as usize] != i64::MIN {
                 ok = false;
@@ -992,6 +992,9 @@ impl MxfFile {
     pub fn read_sample(&self, src: &(impl ByteSource + ?Sized), track: usize, i: usize) -> Result<Vec<u8>> {
         let t = self.tracks.get(track).ok_or_else(|| Error::Invalid(format!("no track {track}")))?;
         let s = t.samples.get(i).ok_or_else(|| Error::Invalid(format!("no sample {i}")))?;
+        if u64::from(s.size) > src.len().saturating_sub(s.offset) {
+            return Err(Error::Invalid("picture sample extends past the end of the source".into()));
+        }
         let mut v = vec![0u8; s.size as usize];
         src.read_at(s.offset, &mut v)?;
         Ok(v)
@@ -1003,26 +1006,52 @@ impl MxfFile {
         let t = self.tracks.get(track).ok_or_else(|| Error::Invalid(format!("no track {track}")))?;
         let si = t.sound.as_ref().ok_or_else(|| Error::Invalid("not a sound track".into()))?;
         let ch = si.channels.max(1) as usize;
+        if ch > 256 {
+            return Err(Error::Invalid("sound track declares more than 256 channels".into()));
+        }
+        // Bound the output by what the file can actually hold (every stored sample frame takes at
+        // least one byte per channel), plus slack for zero padding past the end: header-declared
+        // sizes cannot force a giant allocation, while any legitimately long read still works.
+        let backed = t.stored_sample_frames().saturating_sub(start).min(src.len() / ch as u64);
+        let allowed = usize::try_from(backed).unwrap_or(usize::MAX).saturating_add(PCM_PAD_FRAMES_LIMIT / ch);
+        if frames > allowed {
+            return Err(Error::Invalid("sound request extends far past the stored essence".into()));
+        }
+        if t.sound_format == SoundFormat::Pcm && (si.bits == 0 || si.bits > 32) {
+            return Err(Error::Unsupported("invalid PCM bit depth or block alignment".into()));
+        }
+        let fb = if t.sound_format == SoundFormat::Pcm { si.frame_bytes() } else { 0 };
+        if t.sound_format == SoundFormat::Pcm && (fb == 0 || fb > 4096) {
+            return Err(Error::Unsupported("invalid PCM block alignment".into()));
+        }
         let mut out = vec![vec![0f32; frames]; ch];
-        let end = start + frames as u64;
-        let fb = si.frame_bytes();
-        let mut ci = t.chunks.partition_point(|c| c.first_sample + c.samples <= start);
+        let end = start.saturating_add(frames as u64);
+        let mut ci = t.chunks.partition_point(|c| c.first_sample.saturating_add(c.samples) <= start);
         while let Some(c) = t.chunks.get(ci) {
             if c.first_sample >= end {
                 break;
             }
             let a = start.max(c.first_sample);
-            let b = end.min(c.first_sample + c.samples);
+            let b = end.min(c.first_sample.saturating_add(c.samples));
             if b > a {
                 let decoded = match t.sound_format {
                     SoundFormat::Pcm => {
-                        let off = c.offset + (a - c.first_sample) * fb as u64;
-                        let mut v = vec![0u8; ((b - a) as usize) * fb];
+                        let off = (a - c.first_sample)
+                            .checked_mul(fb as u64)
+                            .and_then(|n| c.offset.checked_add(n))
+                            .ok_or_else(|| Error::Invalid("PCM chunk offset overflows".into()))?;
+                        let bytes = ((b - a) as usize).checked_mul(fb).ok_or_else(|| Error::Invalid("PCM chunk size overflows".into()))?;
+                        // Never allocate past the end of the source (a truncated or lying element).
+                        let in_file = usize::try_from(src.len().saturating_sub(off)).unwrap_or(usize::MAX);
+                        let bytes = bytes.min(in_file / fb * fb);
+                        let mut v = vec![0u8; bytes];
                         src.read_at(off, &mut v)?;
                         decode_pcm(&v, SoundFormat::Pcm, ch, si.bits, fb)?
                     }
                     SoundFormat::Aes3Element => {
-                        let mut v = vec![0u8; c.size as usize];
+                        let size = c.size.min(src.len().saturating_sub(c.offset));
+                        let size = usize::try_from(size).map_err(|_| Error::Invalid("AES3 chunk exceeds the address space".into()))?;
+                        let mut v = vec![0u8; size];
                         src.read_at(c.offset, &mut v)?;
                         let all = decode_pcm(&v, SoundFormat::Aes3Element, ch, si.bits, 0)?;
                         let s0 = (a - c.first_sample) as usize;
@@ -1040,5 +1069,29 @@ impl MxfFile {
             ci += 1;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod index_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn nonzero_segment_positions_and_sparse_gaps_preserve_entries() {
+        let entry = IndexEntry { flags: 0x80, stream_offset: 1234, ..Default::default() };
+        for start_position in [5, 49_999_999, i64::MAX] {
+            let segment = IndexSegment { start_position, entries: vec![entry, entry], ..Default::default() };
+            let (entries, _) = index_entries(&[segment], 0);
+            let start = usize::try_from(start_position).unwrap();
+            assert_eq!(entries.get(&start), Some(&entry));
+            assert_eq!(entries.len(), if start_position == i64::MAX { 1 } else { 2 });
+        }
+    }
+
+    #[test]
+    fn negative_preroll_positions_do_not_drop_later_valid_entries() {
+        let segment = IndexSegment { start_position: -1, entries: vec![IndexEntry::default(); 3], ..Default::default() };
+        let (entries, _) = index_entries(&[segment], 0);
+        assert_eq!(entries.keys().copied().collect::<Vec<_>>(), vec![0, 1]);
     }
 }

@@ -14,6 +14,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     crate::panels::multicam::show_dialog(app, ctx);
     crate::panels::multicam::show_edit_cameras(app, ctx);
     crate::panels::monitor_view::dialogs(app, ctx);
+    crate::panels::graphics::dialogs(app, ctx);
     crate::panels::workspaces::dialogs(app, ctx);
     crate::panels::voiceover::show(app, ctx);
     crate::panels::remix::show(app, ctx);
@@ -380,12 +381,47 @@ fn delete_tracks(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
     keep
 }
 
-/// Help ▸ About FilmCraft: version, credits and the ArtCraft community links. Joining the Discord
-/// is the first, accented button.
+/// Help ▸ About FilmCraft, in three tabs: About (version and the ArtCraft community links),
+/// Contributors and Models (the credits compiled in from `contributors/contributors.json`, see
+/// `crate::credits` and docs/contributors.md).
+///
+/// Automation ids: `about.tab.about`, `about.tab.contributors`, `about.tab.models`; the About tab's
+/// links and the credits controls are listed on [`about_tab`] and [`crate::credits::contributors_ui`].
+fn about(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
+    let tab_id = egui::Id::new("about_tab");
+    let mut tab = ui.data_mut(|d| d.get_temp::<u8>(tab_id)).unwrap_or(0);
+    ui.horizontal(|ui| {
+        for (i, (id, label)) in [("about", tl!("About")), ("contributors", tl!("Contributors")), ("models", tl!("Models"))].into_iter().enumerate() {
+            let i = i as u8;
+            let r = ui.selectable_label(tab == i, label);
+            app.auto.add(&format!("about.tab.{id}"), r.rect, label);
+            if r.clicked() {
+                tab = i;
+            }
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(tab_id, tab));
+    ui.separator();
+    let t = app.tokens;
+    match tab {
+        1 => {
+            ui.set_width(680.0);
+            crate::credits::contributors_ui(ui, &t, &mut app.auto);
+        }
+        2 => {
+            ui.set_width(680.0);
+            crate::credits::models_ui(ui);
+        }
+        _ => about_tab(app, ui),
+    }
+}
+
+/// About ▸ About: version, licence and the ArtCraft community links. Joining the Discord is the
+/// first, accented button.
 ///
 /// Automation ids: `about.discord`, `about.website`, `about.appPage`, `about.github`,
 /// `about.reportIssue`.
-fn about(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
+fn about_tab(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     use crate::icons::{self, Icon};
     use crate::links;
     let t = app.tokens;

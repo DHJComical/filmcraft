@@ -9,8 +9,8 @@
 
 use filmcraft_geom::Vec2;
 use filmcraft_project::graphic::{self, LayerContent, SHAPE_OPTS, eval_layer, layer_display_name, layer_indices, new_shape_layer, new_text_layer};
-use filmcraft_project::{ClipId, ItemId, ItemKind, Label, ParamValue, Sequence, TrackKind};
-use filmcraft_render::graphic_clip::{item_layer_specs, layer_local_bounds, layer_quad};
+use filmcraft_project::{ClipId, EffectInstance, ItemId, ItemKind, Label, Param, ParamValue, Sequence, TrackKind};
+use filmcraft_render::graphic_clip::{item_layer_specs, layer_local_bounds, layer_quad, text_layout};
 use filmcraft_time::{Tick, TimeRange};
 use serde_json::{Value, json};
 
@@ -124,13 +124,15 @@ pub(crate) fn place_video_clip(
             (q.settings.width, q.settings.height, q.settings.frame_rate)
         };
         let (src, dur) = source(pr, (w, h, rate));
+        // an imported picture (`graphics.newFromFile`) keeps its own size: centre its anchor in it
+        let src_size = pr.source_size(src).unwrap_or((w, h));
         let t = rate.snap(t);
         let dur = dur.max(rate.frame_duration());
         let mut ti = pr.make_track_item(src, TrackKind::Video, t, TimeRange::new(Tick::ZERO, dur), rate).ok_or_else(|| bad("graphics.newText", "bad item"))?;
         ti.name = name;
         ti.effects.extend(extra);
         for e in &mut ti.effects {
-            filmcraft_project::resolve_auto_points(e, (w, h), (w, h));
+            filmcraft_project::resolve_auto_points(e, (w, h), src_size);
         }
         let id = ti.id;
         let track_id = filmcraft_project::TrackId(pr.alloc_id());
@@ -191,6 +193,7 @@ fn param_id(k: &str) -> &str {
         "fauxBold" => "faux_bold",
         "fauxItalic" => "faux_italic",
         "boxWidth" => "box_width",
+        "boxHeight" => "box_height",
         "anchorPoint" => "anchor",
         "cornerRadius" => "corner_radius",
         other => other,
@@ -214,6 +217,38 @@ pub(crate) fn to_param(template: &ParamValue, id: &str, v: &Value) -> Option<Par
     crate::commands::json_to_param(template, v)
 }
 
+/// Parameter `id` of a layer, created from the layer definition when the layer was saved before
+/// the parameter existed.
+fn param_entry<'a>(e: &'a mut EffectInstance, id: &str) -> Option<&'a mut Param> {
+    if !e.params.contains_key(id) {
+        let d = filmcraft_project::find_effect(&e.effect)?.param(id)?.default.clone();
+        e.params.insert(id.to_string(), Param::new(d));
+    }
+    e.params.get_mut(id)
+}
+
+/// Set properties `props` on layer `e` (keyframe-aware at media time `mt`). Changing the text
+/// keeps per-character styles on their characters.
+fn apply_props(e: &mut EffectInstance, props: &serde_json::Map<String, Value>, mt: Tick) -> Result<()> {
+    for (k, v) in props {
+        if k == "enabled" {
+            e.enabled = v.as_bool().unwrap_or(true);
+            continue;
+        }
+        let id = param_id(k);
+        let prm = param_entry(e, id).ok_or_else(|| bad("graphics.set", format!("no property `{k}`")))?;
+        let pv = to_param(&prm.value, id, v).ok_or_else(|| bad("graphics.set", format!("`{k}`: value has the wrong type")))?;
+        let old = prm.value_at(mt);
+        prm.set_at(mt, pv.clone());
+        if let (ParamValue::Text(a), ParamValue::Text(b), "text") = (&old, &pv, id)
+            && let Some(x) = e.layer.as_mut()
+        {
+            x.runs = filmcraft_project::graphic_design::adjust_runs(a, b, &x.runs);
+        }
+    }
+    Ok(())
+}
+
 /// Set properties `props` on a layer (keyframe-aware at time `tl`). Changing the text keeps
 /// per-character styles on their characters.
 pub(crate) fn set_props(s: &mut Session, clip: ClipId, eidx: usize, props: &serde_json::Map<String, Value>, tl: Tick, label: &str) -> Result<()> {
@@ -222,24 +257,89 @@ pub(crate) fn set_props(s: &mut Session, clip: ClipId, eidx: usize, props: &serd
         let (_, it) = q.find_item_mut(clip).ok_or(filmcraft_edit::EditError::NoItem(clip))?;
         let mt = it.source_time_at(tl.clamp(it.start, it.end() - Tick(1)));
         let e = it.effects.get_mut(eidx).ok_or_else(|| bad("graphics.set", "no such layer"))?;
-        for (k, v) in &props {
-            if k == "enabled" {
-                e.enabled = v.as_bool().unwrap_or(true);
-                continue;
-            }
-            let id = param_id(k);
-            let prm = e.params.get_mut(id).ok_or_else(|| bad("graphics.set", format!("no property `{k}`")))?;
-            let pv = to_param(&prm.value, id, v).ok_or_else(|| bad("graphics.set", format!("`{k}`: value has the wrong type")))?;
-            let old = prm.value_at(mt);
-            prm.set_at(mt, pv.clone());
-            if let (ParamValue::Text(a), ParamValue::Text(b), "text") = (&old, &pv, id)
-                && let Some(x) = e.layer.as_mut()
-            {
-                x.runs = filmcraft_project::graphic_design::adjust_runs(a, b, &x.runs);
-            }
-        }
+        apply_props(e, &props, mt)?;
         Ok(())
     })
+}
+
+/// Turn a text layer into point text (no box; the lines the box wrapped become real lines) or
+/// paragraph text (a box fitted to the text). The text stays where it is: the layer's origin
+/// moves between the first baseline and the box's top-left corner, and the anchor point is
+/// renumbered to stay on the same spot.
+fn set_text_type(s: &mut Session, p: &Value) -> Result<Value> {
+    const ID: &str = "graphics.setTextType";
+    let clip = target_clip(s, p).ok_or_else(|| bad(ID, "no graphic clip"))?;
+    let (layer, ei) = layer_effect_index(s, clip, p)?;
+    let to_paragraph = match str_p(p, "type").map(str::to_ascii_lowercase).as_deref() {
+        Some("paragraph" | "paragraph text") => true,
+        Some("point" | "point text") => false,
+        _ => return Err(bad(ID, "need `type`: point or paragraph")),
+    };
+    let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
+    let (_, it) = seq.find_item(clip).ok_or_else(|| bad(ID, "no such clip"))?;
+    let size = match s.project.item(it.item).map(|p| &p.kind) {
+        Some(ItemKind::Graphic { width, height, .. }) => (*width, *height),
+        _ => (seq.settings.width, seq.settings.height),
+    };
+    let ph = s.playhead();
+    let mt = it.source_time_at(ph.clamp(it.start, it.end() - Tick(1)));
+    let spec = it.effects.get(ei).and_then(|e| eval_layer(e, mt, size)).ok_or_else(|| bad(ID, "no such layer"))?;
+    let LayerContent::Text(tp) = &spec.content else { return Err(bad(ID, "not a text layer")) };
+    if tp.vertical {
+        return Err(bad(ID, "vertical text is always point text"));
+    }
+    let name = |paragraph: bool| if paragraph { "paragraph" } else { "point" };
+    if (tp.box_width > 0.0) == to_paragraph {
+        return Ok(json!({"clip": clip.0, "layer": layer, "type": name(to_paragraph), "changed": false}));
+    }
+    // where point text's origin (its alignment point on the first baseline) sits in a box `w` wide
+    let origin_x = |w: f32| match tp.align {
+        1 => w / 2.0,
+        2 => w,
+        _ => 0.0,
+    };
+    let mut props = serde_json::Map::new();
+    // what to add to the anchor so that it stays on the same spot of the picture
+    let shift = if to_paragraph {
+        let widest = text_layout(tp).lines.iter().map(|l| l.width).fold(0.0, f32::max);
+        // a little slack, so that no line wraps
+        let w = (widest.ceil() + 1.0).clamp(1.0, 100_000.0);
+        let boxed = text_layout(&graphic::TextProps { box_width: w, box_height: 0.0, ..tp.clone() });
+        let h = (boxed.bounds[3].ceil() + 1.0).clamp(1.0, 100_000.0);
+        props.insert("box_width".into(), json!(w));
+        props.insert("box_height".into(), json!(h));
+        (origin_x(w), boxed.lines.first().map_or(0.0, |l| l.baseline))
+    } else {
+        // every line, also those the box hides
+        let all = text_layout(&graphic::TextProps { box_height: 0.0, ..tp.clone() });
+        let mut text = String::with_capacity(tp.text.len());
+        for (i, l) in all.lines.iter().enumerate() {
+            let line = tp.text.get(l.range.clone()).unwrap_or_default();
+            // a wrapped line ends where the next begins: its trailing space becomes the line break
+            let wrapped = all.lines.get(i + 1).is_some_and(|n| n.range.start == l.range.end);
+            text.push_str(if wrapped { line.trim_end() } else { line });
+            if i + 1 < all.lines.len() {
+                text.push('\n');
+            }
+        }
+        props.insert("text".into(), json!(text));
+        props.insert("box_width".into(), json!(0.0));
+        props.insert("box_height".into(), json!(0.0));
+        (-origin_x(tp.box_width), -all.lines.first().map_or(0.0, |l| l.baseline))
+    };
+    s.edit_sequence("Text Layer Type", |q, _, _| {
+        let (_, it) = q.find_item_mut(clip).ok_or(filmcraft_edit::EditError::NoItem(clip))?;
+        let e = it.effects.get_mut(ei).ok_or_else(|| bad(ID, "no such layer"))?;
+        apply_props(e, &props, mt)?;
+        if let Some(a) = param_entry(e, "anchor") {
+            a.map_values(|v| match v.as_vec2() {
+                Some(a) => ParamValue::Vec2(Vec2::new(a.x + shift.0 as f64, a.y + shift.1 as f64)),
+                None => v,
+            });
+        }
+        Ok(())
+    })?;
+    Ok(json!({"clip": clip.0, "layer": layer, "type": name(to_paragraph), "changed": true}))
 }
 
 /// Layers of a graphic clip with their evaluated bounds (sequence/canvas pixels).
@@ -265,6 +365,14 @@ fn list_layers(s: &Session, clip: ClipId) -> Result<Value> {
                 LayerContent::Text(t) => ("text", Some(t.text.clone())),
                 LayerContent::Shape(sh) => (SHAPE_OPTS.get(sh.shape as usize).copied().unwrap_or("Shape"), None),
             };
+            // point text has no box; paragraph text wraps in one and hides what does not fit
+            let (text_type, text_box, overflow) = match &sp.content {
+                LayerContent::Text(t) if t.box_width > 0.0 && !t.vertical => {
+                    (Some("paragraph"), Some([t.box_width, t.box_height]), Some(text_layout(t).overflow))
+                }
+                LayerContent::Text(_) => (Some("point"), None, None),
+                LayerContent::Shape(_) => (None, None, None),
+            };
             Some(json!({
                 "layer": i,
                 "effectIndex": ei,
@@ -272,7 +380,13 @@ fn list_layers(s: &Session, clip: ClipId) -> Result<Value> {
                 "kind": kind,
                 "text": text,
                 "enabled": e.enabled,
+                "textType": text_type,
+                "box": text_box,
+                "overflow": overflow,
                 "position": [sp.transform.position.x, sp.transform.position.y],
+                "anchor": [sp.transform.anchor.x, sp.transform.anchor.y],
+                "scale": sp.transform.scale.y * 100.0,
+                "scaleWidth": sp.transform.scale.x * 100.0,
                 "uid": extra.map_or(0, |x| x.uid),
                 "pin": extra.and_then(|x| x.pin.as_ref()).map(|p| serde_json::to_value(p).unwrap_or_default()),
                 "styles": extra.map(|x| serde_json::to_value(&x.runs).unwrap_or_default()).unwrap_or(json!([])),
@@ -751,7 +865,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "Text",
             &["Graphics and Titles", "New Layer"],
             Some("Cmd+T"),
-            r#"{"text":str="New Text","position":[x,y]?,"clip":id?,"newClip":bool?,"vertical":bool=false,"size":px=100,"font":str?,"fontStyle":str?,"seconds":f64=5,"track":index?,"time":ticks?}"#,
+            r#"{"text":str="New Text","position":[x,y]? (point text: its alignment point on the first baseline; with `box`: the box's top-left corner),"box":[w,h]? (paragraph text wrapped in a box this size),"clip":id?,"newClip":bool?,"vertical":bool=false,"size":px=100,"font":str?,"fontStyle":str?,"seconds":f64=5,"track":index?,"time":ticks?}"#,
             has_seq,
             |s, p| {
                 let text = str_p(p, "text").unwrap_or("New Text").to_string();
@@ -761,18 +875,20 @@ pub fn commands() -> Vec<CommandSpec> {
                 let (w, h) = s.active_sequence().map(|q| (q.settings.width, q.settings.height)).unwrap_or((1920, 1080));
                 let pos = vec2_p(p, "position").unwrap_or(Vec2::new(w as f64 / 2.0, h as f64 / 2.0));
                 let size = f64_p(p, "size").unwrap_or(100.0);
-                let mut layer = if p.get("vertical").and_then(Value::as_bool) == Some(true) {
-                    graphic::new_vertical_text_layer(&text, pos, size)
-                } else {
-                    new_text_layer(&text, pos, size)
-                };
-                layer.params.insert("ligatures".into(), filmcraft_project::Param::new(ParamValue::Bool(gp.ligatures)));
+                let vertical = p.get("vertical").and_then(Value::as_bool) == Some(true);
+                let mut layer = if vertical { graphic::new_vertical_text_layer(&text, pos, size) } else { new_text_layer(&text, pos, size) };
+                if let Some(b) = vec2_p(p, "box").filter(|_| !vertical) {
+                    for (id, v) in [("box_width", b.x), ("box_height", b.y)] {
+                        layer.params.insert(id.into(), Param::new(ParamValue::Float(v.clamp(1.0, 100_000.0))));
+                    }
+                }
+                layer.params.insert("ligatures".into(), Param::new(ParamValue::Bool(gp.ligatures)));
                 if !gp.default_font.trim().is_empty() {
-                    layer.params.insert("font".into(), filmcraft_project::Param::new(ParamValue::Text(gp.default_font.trim().into())));
+                    layer.params.insert("font".into(), Param::new(ParamValue::Text(gp.default_font.trim().into())));
                 }
                 for (k, id) in [("font", "font"), ("fontStyle", "font_style")] {
                     if let Some(v) = str_p(p, k) {
-                        layer.params.insert(id.into(), filmcraft_project::Param::new(ParamValue::Text(v.into())));
+                        layer.params.insert(id.into(), Param::new(ParamValue::Text(v.into())));
                     }
                 }
                 let into = if p.get("newClip").and_then(Value::as_bool) == Some(true) { None } else { u64_p(p, "clip").map(ClipId) };
@@ -858,6 +974,15 @@ pub fn commands() -> Vec<CommandSpec> {
                 set_props(s, clip, ei, &props, tl, "Change Graphic Property")?;
                 Ok(Value::Null)
             },
+        ),
+        spec(
+            "graphics.setTextType",
+            "Text Layer Type",
+            &[],
+            None,
+            r#"{"clip":id?,"layer":n|name?,"type":"point|paragraph" (point: no box, handles scale the text; paragraph: the text wraps in a box that handles resize)}"#,
+            has_graphic,
+            set_text_type,
         ),
         spec("graphics.selectLayer", "Select Graphic Layer", &[], None, r#"{"clip":id?,"layers":[n]}"#, has_graphic, |s, p| {
             let clip = target_clip(s, p).ok_or_else(|| bad("graphics.selectLayer", "no graphic clip"))?;

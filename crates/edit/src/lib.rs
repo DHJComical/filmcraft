@@ -35,8 +35,9 @@ pub enum EditError {
     NoTrack(TrackId),
     #[error("track is locked")]
     Locked,
-    #[error("this edit would break sync on a sync-locked track")]
-    SyncLockConflict,
+    /// Names the sync-locked track (`A2`) whose clip is in the way.
+    #[error("this edit would break sync: {0} is sync-locked and has a clip in the way (turn off its sync lock, or lock the track, to make this edit)")]
+    SyncLockConflict(String),
     #[error("not enough media (handles) for this trim")]
     NoHandles,
     #[error("edit would make a clip shorter than one frame")]
@@ -381,6 +382,17 @@ fn ripple_delete_spans(seq: &Sequence, items: &[ClipId]) -> Vec<TimeRange> {
     spans
 }
 
+/// How the UI names a track: `V1`, `A2` (by position), else its name.
+pub fn track_label(seq: &Sequence, id: TrackId) -> String {
+    if let Some(i) = seq.video_tracks.iter().position(|t| t.id == id) {
+        return format!("V{}", i + 1);
+    }
+    if let Some(i) = seq.audio_tracks.iter().position(|t| t.id == id) {
+        return format!("A{}", i + 1);
+    }
+    seq.track(id).map(|t| t.name.clone()).unwrap_or_else(|| format!("track {}", id.0))
+}
+
 /// `ranges` in time order, with the ones that touch or overlap joined.
 fn merged(mut ranges: Vec<TimeRange>) -> Vec<TimeRange> {
     ranges.sort_by_key(|r| r.start);
@@ -422,7 +434,7 @@ pub fn ripple_delete_items(seq: &mut Sequence, items: &[ClipId]) -> Result<Vec<T
                 continue;
             }
             if !on_affected && !track_range_empty(tr, *span) {
-                return Err(EditError::SyncLockConflict);
+                return Err(EditError::SyncLockConflict(track_label(seq, tr.id)));
             }
             shift_track_from(tr, span.end(), -span.duration);
         }
@@ -450,7 +462,7 @@ pub fn close_gap(seq: &mut Sequence, track: TrackId, t: Tick) -> Result<()> {
                 continue;
             }
             if !track_range_empty(tr, gap) {
-                return Err(EditError::SyncLockConflict);
+                return Err(EditError::SyncLockConflict(track_label(seq, tr.id)));
             }
         }
         shift_track_from(tr, gap.end(), -gap.duration);
@@ -589,7 +601,7 @@ pub fn trim(seq: &mut Sequence, clip: ClipId, edge: Edge, mode: TrimMode, delta:
                 // (the clip's own linked partners are the caller's to trim or leave)
                 let in_the_way = tr.items.iter().any(|i| i.range().overlaps(&closing) && (own_link.is_none() || i.link != own_link));
                 if tr.id != tid && shift < Tick::ZERO && in_the_way {
-                    return Err(EditError::SyncLockConflict);
+                    return Err(EditError::SyncLockConflict(track_label(seq, tr.id)));
                 }
                 let from = if edge == Edge::In { old_start + Tick(1) } else { old_end };
                 for i in &mut tr.items {
@@ -700,7 +712,7 @@ pub fn ripple_trim_group(seq: &mut Sequence, clips: &[ClipId], edge: Edge, delta
             let closing = if edge == Edge::In { TimeRange::new(from - Tick(1), -shift) } else { TimeRange::new(from + shift, -shift) };
             let own = |i: &TrackItem| i.link.is_some_and(|l| own_links.contains(&l));
             if tr.items.iter().any(|i| i.range().overlaps(&closing) && !follows(i) && !own(i) && !stays(i)) {
-                return Err(EditError::SyncLockConflict);
+                return Err(EditError::SyncLockConflict(track_label(seq, tid)));
             }
         }
         let followers: Vec<ClipId> = tr.items.iter().filter(|i| !clips.contains(&i.id) && follows(i)).map(|i| i.id).collect();
@@ -719,7 +731,7 @@ pub fn ripple_trim_group(seq: &mut Sequence, clips: &[ClipId], edge: Edge, delta
         });
         // a follower with no room (a clip in its way, or the sequence start) blocks the edit
         if tr.items.first().is_some_and(|i| i.start < Tick::ZERO) || tr.items.windows(2).any(|w| w[0].end() > w[1].start) {
-            return Err(EditError::SyncLockConflict);
+            return Err(EditError::SyncLockConflict(track_label(seq, tr.id)));
         }
     }
     transitions_follow_cuts(seq, &mut work);
@@ -908,6 +920,7 @@ pub fn set_speed_group(seq: &mut Sequence, clips: &[ClipId], speed: f64, reverse
     if ripple {
         transitions_follow_cuts(seq, &mut work);
     }
+    work.check().map_err(EditError::Other)?;
     *seq = work;
     Ok(())
 }

@@ -1079,10 +1079,10 @@ fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq: &Sequenc
     let ruler = layout.ruler;
     // background of the whole top block
     p.rect_filled(Rect::from_min_max(rect.min, pos2(rect.max.x, ruler.max.y)), 0.0, t.panel_bg);
-    // current timecode: 14 pt semibold accent
+    // current timecode: Premiere's big blue timecode
     let tc = format_time(app.session.playhead(), rate, seq.settings.drop_frame, TimeDisplay::Timecode, seq.settings.sample_rate as i64);
     let tc_rect = Rect::from_min_size(pos2(rect.min.x + 14.0, rect.min.y + 4.0), vec2(hw - 20.0, 20.0));
-    p.text(pos2(tc_rect.min.x, tc_rect.center().y), Align2::LEFT_CENTER, &tc, Tokens::semibold(15.0), t.hot_text);
+    p.text(pos2(tc_rect.min.x, tc_rect.center().y), Align2::LEFT_CENTER, &tc, Tokens::timecode(), t.timecode);
     app.auto.add("timeline.timecode", tc_rect, &tc);
     // toolbar: 30 × 30 buttons, "on" = #4b4b4b fill
     let mut x = rect.min.x + 12.0;
@@ -1404,6 +1404,16 @@ fn edge_geometry(seq: &Sequence, layout: &Layout, track: filmcraft_project::Trac
 
 /// Snap `t` to nearby candidates (edits, playhead, markers, in/out). Returns snapped tick.
 fn snap(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, t: Tick, exclude: &[ClipId]) -> Tick {
+    snap_to(app, seq, layout, t, exclude, true)
+}
+
+/// Where a dragged playhead lands: [`snap`], but not onto itself, or it would stick where it is
+/// and only move in jumps of `SNAP_PX` (#164).
+fn snap_playhead(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, t: Tick) -> Tick {
+    snap_to(app, seq, layout, t, &[], false)
+}
+
+fn snap_to(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, t: Tick, exclude: &[ClipId], to_playhead: bool) -> Tick {
     if !app.session.state.snapping {
         return t;
     }
@@ -1417,7 +1427,9 @@ fn snap(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, t: Tick, exclud
             cands.push(it.end());
         }
     }
-    cands.push(app.session.playhead());
+    if to_playhead {
+        cands.push(app.session.playhead());
+    }
     cands.extend(seq.markers.iter().map(|m| m.start));
     cands.extend(seq.mark_in);
     cands.extend(seq.mark_out);
@@ -1891,7 +1903,10 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
         if let Some(d) = started {
             if matches!(d, Drag::Scrub) {
                 app.stop();
-                let tt = rate.snap_nearest(layout.tick_at(p.x).max(Tick::ZERO));
+                let mut tt = rate.snap_nearest(layout.tick_at(p.x).max(Tick::ZERO));
+                if mods.shift || app.session.prefs.timeline.snap_playhead {
+                    tt = snap_playhead(app, seq, layout, tt);
+                }
                 app.session.set_playhead(tt);
             }
             if resp.drag_started() {
@@ -1911,7 +1926,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
                 let mut tt = rate.snap_nearest(t_here.max(Tick::ZERO));
                 // Shift snaps; Settings ▸ Timeline ▸ "Snap playhead in Timeline when Snap is enabled"
                 if mods.shift || app.session.prefs.timeline.snap_playhead {
-                    tt = snap(app, seq, layout, tt, &[]);
+                    tt = snap_playhead(app, seq, layout, tt);
                 }
                 app.session.set_playhead(tt);
                 Some(Drag::Scrub)
@@ -2093,10 +2108,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
                 let r = ui.add_enabled(!sel.is_empty() && app.session.is_enabled(cmd), egui::Button::new(label));
                 app.auto.add(&format!("timeline.clipMenu.{cmd}"), r.rect, label);
                 if r.clicked() {
-                    if cmd == "clip.speedDuration" {
-                        app.dialog = None;
-                        let _ = app.session.execute(cmd, json!({"speed": 50.0}));
-                    } else if let Err(e) = crate::menus::invoke(app, &ctx, cmd, json!({})) {
+                    if let Err(e) = crate::menus::invoke(app, &ctx, cmd, json!({})) {
                         app.ui.status = e;
                     }
                     ui.close();

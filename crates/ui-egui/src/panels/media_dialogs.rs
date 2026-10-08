@@ -17,8 +17,8 @@
 use egui::{Color32, RichText};
 use serde_json::{Value, json};
 
-use crate::FilmcraftApp;
 use crate::state::{LinkMediaDraft, ProjectManagerDraft, ProxyDraft};
+use crate::{FilmcraftApp, RelinkHint};
 
 type Elems = Vec<(String, egui::Rect, String)>;
 
@@ -81,9 +81,16 @@ pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<
             let item = app.session.state.project_selection.first().copied();
             let Some(item) = item else { return Some(Err("select a clip in the Project panel".into())) };
             let exts: Vec<&str> = filmcraft_media::VIDEO_EXTENSIONS.to_vec();
-            let path = app.hooks.pick_files.as_mut().and_then(|f| f(&exts).into_iter().next());
-            let Some(path) = path else { return Some(Ok(Value::Null)) };
-            Some(app.session.execute(id, json!({"item": item.0, "path": path})).map_err(|e| e.to_string()))
+            let hint = RelinkHint { command: id.to_string(), params: json!({"item": item.0}) };
+            let picked = if let Some(picker) = app.hooks.pick_file_for_relink.as_mut() {
+                picker(&exts, Some(hint))
+            } else if let Some(picker) = app.hooks.pick_files.as_mut() {
+                picker(&exts).into_iter().next()
+            } else {
+                None
+            };
+            let Some(picked) = picked else { return Some(Ok(Value::Null)) };
+            Some(app.session.execute(id, json!({"item": item.0, "path": picked})).map_err(|e| e.to_string()))
         }
         "file.projectManager" => Some(enabled(app, id).map(|_| {
             let seqs = app.session.state.active_sequence.map(|s| vec![s.0]).unwrap_or_default();
@@ -333,7 +340,17 @@ fn link_media(app: &mut FilmcraftApp, ctx: &egui::Context) {
         Some("locate") => {
             let exts: Vec<&str> =
                 filmcraft_media::VIDEO_EXTENSIONS.iter().chain(filmcraft_media::AUDIO_EXTENSIONS).chain(filmcraft_media::STILL_EXTENSIONS).copied().collect();
-            if let Some(path) = app.hooks.pick_files.as_mut().and_then(|f| f(&exts).into_iter().next()) {
+            let mut params = match_params(&d);
+            params["item"] = json!(item);
+            let hint = RelinkHint { command: "media.relink".into(), params };
+            let picked = if let Some(picker) = app.hooks.pick_file_for_relink.as_mut() {
+                picker(&exts, Some(hint))
+            } else if let Some(picker) = app.hooks.pick_files.as_mut() {
+                picker(&exts).into_iter().next()
+            } else {
+                None
+            };
+            if let Some(path) = picked {
                 relink(app, &mut d, path);
             }
         }

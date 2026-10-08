@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use filmcraft_export::presets::{DEFAULT_PRESET, preset_key};
-use filmcraft_export::{ExportPreset, ExportSettings, Format};
+use filmcraft_export::{ExportPreset, ExportSettings, Format, HardwareEncoding};
 use filmcraft_project::{ItemId, Project};
 use filmcraft_time::{FrameRate, Tick, TimeRange};
 use serde::{Deserialize, Serialize};
@@ -187,18 +187,30 @@ pub fn settings_from_params(s: &Session, p: &Value, cmd: &str) -> Result<(Option
     if let Some(v) = u64_p(p, "quality") {
         settings.quality = v.min(100) as u8;
     }
-    if let Some(v) = u64_p(p, "bitrateKbps") {
-        settings.bitrate_kbps = v as u32;
+    if let Some(v) = crate::commands::checked_u32_p(p, "bitrateKbps", cmd)? {
+        settings.bitrate_kbps = v;
         settings.adaptive_bitrate = None;
     }
-    if let Some(v) = u64_p(p, "maxBitrateKbps") {
-        settings.max_bitrate_kbps = Some(v as u32);
+    if let Some(v) = crate::commands::checked_u32_p(p, "maxBitrateKbps", cmd)? {
+        settings.max_bitrate_kbps = Some(v);
     }
     if let Some(v) = str_p(p, "bitrateMode") {
         settings.bitrate_mode = serde_json::from_value(json!(v)).map_err(|_| bad(cmd, "bitrateMode: cbr | vbr1Pass | vbr2Pass"))?;
     }
-    if let Some(v) = u64_p(p, "keyframeDistance") {
-        settings.keyframe_distance = Some(v as u32);
+    if let Some(v) = crate::commands::checked_u32_p(p, "keyframeDistance", cmd)? {
+        settings.keyframe_distance = Some(v);
+    }
+    if let Some(v) = p.get("hardwareEncoding") {
+        settings.hardware_encoding = match v {
+            Value::Bool(on) => {
+                if *on {
+                    HardwareEncoding::Auto
+                } else {
+                    HardwareEncoding::Off
+                }
+            }
+            other => serde_json::from_value(other.clone()).map_err(|_| bad(cmd, "hardwareEncoding: off | auto"))?,
+        };
     }
     if let Some(v) = bool_p(p, "burnCaptions") {
         settings.burn_captions = v;
@@ -218,8 +230,10 @@ pub fn settings_from_params(s: &Session, p: &Value, cmd: &str) -> Result<(Option
     if let Some(v) = bool_p(p, "sdr") {
         settings.sdr = v;
     }
-    if let (Some(w), Some(h)) = (u64_p(p, "width"), u64_p(p, "height")) {
-        settings.frame_size = Some((w as u32, h as u32));
+    match (crate::commands::checked_u32_p(p, "width", cmd)?, crate::commands::checked_u32_p(p, "height", cmd)?) {
+        (Some(w), Some(h)) => settings.frame_size = Some((w, h)),
+        (None, None) => {}
+        _ => return Err(bad(cmd, "provide both width and height")),
     }
     if let Some(v) = p.get("fps") {
         settings.frame_rate = Some(parse_rate(v).ok_or_else(|| bad(cmd, "fps: a number (29.97) or \"num/den\""))?);
@@ -251,6 +265,7 @@ pub fn sequence_param(s: &Session, p: &Value, cmd: &str) -> Result<ItemId> {
 /// without a `range` mean `custom`.
 pub fn range_param(s: &Session, project: &Project, seq: ItemId, v: Option<&Value>, p: &Value, cmd: &str) -> Result<Option<TimeRange>> {
     let q = project.sequence(seq).ok_or(EngineError::NoSequence)?;
+    q.check_bounds().map_err(|e| bad(cmd, e))?;
     let fd = q.settings.frame_rate.frame_duration();
     let whole = TimeRange::from_bounds(Tick::ZERO, q.duration().max(fd));
     let mode = match v {
@@ -260,13 +275,9 @@ pub fn range_param(s: &Session, project: &Project, seq: ItemId, v: Option<&Value
         Some(o @ Value::Object(_)) => return range_param(s, project, seq, o.get("mode").or(Some(&json!("custom"))), o, cmd),
         Some(other) => return Err(bad(cmd, format!("range: unexpected {other}"))),
     };
-    Ok(Some(match mode.as_str() {
+    let range = match mode.as_str() {
         "entire" | "entiresequence" | "sequence" | "all" => whole,
-        "inout" | "sequenceinout" => {
-            let a = q.mark_in.unwrap_or(Tick::ZERO);
-            let b = q.mark_out.map(|o| o + fd).unwrap_or(q.duration());
-            TimeRange::from_bounds(a, b.max(a + fd))
-        }
+        "inout" | "sequenceinout" => filmcraft_export::export_range(project, seq, &ExportSettings::default()).map_err(|e| bad(cmd, e.to_string()))?,
         "workarea" => q.work_area.ok_or_else(|| bad(cmd, "the sequence has no work area"))?,
         "custom" => {
             let a = time_p(s, p, "start").ok_or_else(|| bad(cmd, "custom range: need start (startTime / startSeconds / startFrame / startTimecode)"))?;
@@ -274,10 +285,13 @@ pub fn range_param(s: &Session, project: &Project, seq: ItemId, v: Option<&Value
             if b <= a {
                 return Err(bad(cmd, "custom range: end must be after start"));
             }
-            TimeRange::from_bounds(a, b)
+            let duration = b.0.checked_sub(a.0).ok_or_else(|| bad(cmd, "custom range: duration overflows"))?;
+            TimeRange::new(a, Tick(duration))
         }
         other => return Err(bad(cmd, format!("range `{other}`: entire | inOut | workArea | custom"))),
-    }))
+    };
+    filmcraft_export::validate_range(range).map_err(|e| bad(cmd, e.to_string()))?;
+    Ok(Some(range))
 }
 
 /// Where exports go when no path is given: next to the saved project, else ~/Movies, else the
@@ -516,6 +530,7 @@ fn item_json(s: &Session, it: &QueueItem) -> Value {
         "range": it.settings.range,
         "status": it.status,
         "progress": progress,
+        "etaSeconds": job.filter(|_| it.status == QueueStatus::Encoding).and_then(|j| j.progress.eta()).map(|d| d.as_secs_f64()),
         "statusText": status_text,
         "job": it.job,
         "error": it.error,

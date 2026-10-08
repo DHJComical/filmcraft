@@ -5,6 +5,10 @@
 //! freed pages (measured: 2.5 GB retained next to 2.5 GB live after twelve clips). Decoders take
 //! their planes here instead ([`take_u8`], [`take_u16`]) and caches hand evicted frames back
 //! ([`recycle`]), so steady-state decoding allocates nothing.
+//!
+//! The compositor's working images (premultiplied linear `f32`, 33 MB at 1080p) get the same
+//! treatment ([`take_f32_overwritten`], [`recycle_f32`]): allocated and freed once per layer per
+//! frame they cost a zero-fill and fresh page faults every time.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -60,6 +64,13 @@ static U8: Mutex<Shelf<u8>> = Mutex::new(Shelf::new());
 static U16: Mutex<Shelf<u16>> = Mutex::new(Shelf::new());
 static REUSED: AtomicU64 = AtomicU64::new(0);
 
+/// Idle float images. Unlike the plane shelves a buffer keeps its length *and its old contents*:
+/// whoever overwrites every element gets it back without a zero-fill pass over tens of megabytes.
+static F32: Mutex<Vec<Vec<f32>>> = Mutex::new(Vec::new());
+
+/// Bytes of idle float images kept; a buffer that does not fit is freed.
+const F32_MAX_BYTES: usize = 320 << 20;
+
 fn take<T>(shelf: &Mutex<Shelf<T>>, len: usize) -> Vec<T> {
     let found = shelf.lock().unwrap_or_else(PoisonError::into_inner).take(len);
     match found {
@@ -88,6 +99,33 @@ pub fn take_u16(len: usize) -> Vec<u16> {
     take(&U16, len)
 }
 
+/// A buffer of exactly `len` floats whose contents are unspecified (whatever it held last, or zeros
+/// when none was idle): the caller must write every element before it reads any. Handing it back
+/// ([`recycle_f32`]) is optional; a buffer that is dropped is simply freed.
+pub fn take_f32_overwritten(len: usize) -> Vec<f32> {
+    if len.saturating_mul(4) >= MIN_BYTES {
+        let mut idle = F32.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(k) = idle.iter().position(|b| b.len() == len) {
+            REUSED.fetch_add(1, Ordering::Relaxed);
+            return idle.swap_remove(k);
+        }
+    }
+    vec![0.0; len]
+}
+
+/// Keep a float image nobody needs any more for the next [`take_f32_overwritten`] of its length.
+pub fn recycle_f32(buf: Vec<f32>) {
+    let bytes = buf.len().saturating_mul(4);
+    if bytes < MIN_BYTES {
+        return;
+    }
+    let mut idle = F32.lock().unwrap_or_else(PoisonError::into_inner);
+    let held: usize = idle.iter().map(|b| b.len().saturating_mul(4)).sum();
+    if held.saturating_add(bytes) <= F32_MAX_BYTES {
+        idle.push(buf);
+    }
+}
+
 /// Hand back a frame nobody needs any more: its planes are kept for the next [`take_u8`] /
 /// [`take_u16`] unless something else still holds the frame or a plane.
 pub fn recycle(frame: Arc<VideoFrame>) {
@@ -111,13 +149,17 @@ pub fn stats() -> PoolStats {
     let idle = |n: usize, m: usize| n.saturating_add(m);
     let a = U8.lock().unwrap_or_else(PoisonError::into_inner).bytes;
     let b = U16.lock().unwrap_or_else(PoisonError::into_inner).bytes;
-    PoolStats { idle_bytes: idle(a, b), reused: REUSED.load(Ordering::Relaxed) }
+    let c: usize = F32.lock().unwrap_or_else(PoisonError::into_inner).iter().map(|b| b.len().saturating_mul(4)).sum();
+    PoolStats { idle_bytes: idle(idle(a, b), c), reused: REUSED.load(Ordering::Relaxed) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Chroma;
+
+    /// The plane shelves may hold up to this much alongside the float shelf in a test binary.
+    const U8_BYTES_UPPER_BOUND: usize = 2 * MAX_BYTES;
 
     #[test]
     fn shelf_hands_back_a_fitting_buffer_and_stays_within_its_budget() {
@@ -137,6 +179,33 @@ mod tests {
         assert_eq!((b.len(), b.capacity()), (0, 1 << 20));
         assert_eq!((s.bufs.len(), s.bytes), (1, 2 << 20));
         assert!(s.take(1 << 20).is_none(), "2 MiB wastes too much for 1 MiB");
+    }
+
+    #[test]
+    fn float_images_come_back_whole_and_unchanged_within_their_budget() {
+        // a length nothing else in this test binary asks for
+        let len = 1_000_003usize;
+        let mut b = take_f32_overwritten(len);
+        assert_eq!(b.len(), len);
+        assert!(b.iter().all(|v| *v == 0.0), "a fresh buffer is zeroed");
+        b[17] = 4.5;
+        let at = b.as_ptr() as usize;
+        recycle_f32(b);
+        // the same allocation, length and contents (the caller overwrites it)
+        let again = take_f32_overwritten(len);
+        assert_eq!((again.as_ptr() as usize, again.len(), again[17]), (at, len, 4.5));
+        // another length does not match, and is not handed the idle one
+        recycle_f32(again);
+        let other = take_f32_overwritten(len + 1);
+        assert_eq!(other.len(), len + 1);
+        assert_ne!(other.as_ptr() as usize, at);
+        // small buffers are not kept, and nothing exceeds the budget
+        recycle_f32(vec![0.0; 100]);
+        let budget_len = F32_MAX_BYTES / 4;
+        recycle_f32(vec![0.0; budget_len + 1]);
+        assert!(stats().idle_bytes <= F32_MAX_BYTES + (U8_BYTES_UPPER_BOUND), "idle {}", stats().idle_bytes);
+        // leave nothing behind for other tests
+        drop(take_f32_overwritten(len));
     }
 
     #[test]

@@ -146,6 +146,43 @@ fn wav_and_aiff_audio_only() {
 }
 
 #[test]
+fn invalid_export_allocations_are_rejected_before_rendering() {
+    let (project, sequence, _) = matte([1.0, 0.0, 0.0, 1.0], 64, 36, None);
+    for size in [(0, 36), (64, 0), (u32::MAX, u32::MAX), (32768, 16384), (40000, 16)] {
+        let settings = ExportSettings { frame_size: Some(size), ..Default::default() };
+        assert!(settings.validate().is_err(), "{size:?}");
+        assert!(pipeline::Pipeline::new(project.clone(), sequence, &settings, false).is_err());
+    }
+    for size in [(15360, 8640), (16384, 8192)] {
+        assert!(ExportSettings { frame_size: Some(size), ..Default::default() }.validate().is_ok(), "{size:?} is a real output size");
+    }
+    for scale in [0.0, -1.0, f32::NAN, f32::INFINITY, 1e30] {
+        let settings = ExportSettings { scale, ..Default::default() };
+        assert!(pipeline::Pipeline::new(project.clone(), sequence, &settings, false).is_err(), "scale {scale}");
+    }
+    for rate in [0, 384_001, u32::MAX] {
+        let settings = ExportSettings { audio: AudioSettings { sample_rate: Some(rate), ..Default::default() }, ..Default::default() };
+        assert!(settings.validate().is_err());
+    }
+}
+
+#[test]
+fn hostile_export_ranges_are_rejected_before_time_arithmetic() {
+    let (project, seq, sources) = matte([1.0, 0.0, 0.0, 1.0], 64, 36, None);
+    for range in [
+        TimeRange::new(Tick(i64::MIN), Tick(i64::MAX)),
+        TimeRange::new(Tick(i64::MAX), Tick(1)),
+        TimeRange::new(Tick::ZERO, Tick(-1)),
+        TimeRange::new(Tick::ZERO, Tick::ZERO),
+    ] {
+        let settings = ExportSettings { range: Some(range), ..Default::default() };
+        assert!(settings.validate().is_err());
+        assert!(export_range(&project, seq, &settings).is_err());
+        assert!(export(&project, seq, &settings, &sources, &Progress::default()).is_err());
+    }
+}
+
+#[test]
 fn frame_size_rate_and_scaling() {
     let (p, seq, m) = matte([1.0, 0.0, 0.0, 1.0], 320, 180, Some(-12.0));
     let dir = Scratch::new("size");
@@ -408,5 +445,92 @@ fn aac_bitrate_is_capped_for_low_sample_rates() {
     for (rate, ch) in [(22_050, 2), (16_000, 2), (8_000, 6), (48_000, 2)] {
         let enc = aac_factory(Format::H264, rate, ch, &s).expect("AAC is always available");
         assert!(enc.is_ok(), "{rate} Hz × {ch}: {:?}", enc.err());
+    }
+}
+
+#[test]
+fn a_time_left_reads_like_a_clock() {
+    use std::time::Duration;
+    let f = |ms: u64| format_eta(Duration::from_millis(ms));
+    assert_eq!(f(0), "0 s");
+    assert_eq!(f(1), "1 s", "rounded up: never say 0 s while there is time left");
+    assert_eq!(f(45_000), "45 s");
+    assert_eq!(f(59_001), "1:00");
+    assert_eq!(f(60_000), "1:00");
+    assert_eq!(f(125_000), "2:05");
+    assert_eq!(f(3_599_000), "59:59");
+    assert_eq!(f(3_600_000), "1:00:00");
+    assert_eq!(f(3_725_000), "1:02:05");
+    assert_eq!(f(100 * 3600 * 1000), "100:00:00");
+    assert!(!format_eta(Duration::MAX).is_empty(), "the largest duration cannot overflow");
+}
+
+#[test]
+fn h265_is_a_format_that_needs_a_registered_encoder() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // names, ids, files and serialized settings
+    for name in ["hevc", "H.265", "h265", "HVC1", "x265"] {
+        assert_eq!(Format::from_name(name), Some(Format::Hevc), "{name}");
+    }
+    assert_eq!(Format::from_name(Format::Hevc.id()), Some(Format::Hevc));
+    assert_eq!((Format::Hevc.extension(), Format::Hevc.label()), ("mp4", "H.265 (HEVC)"));
+    assert!(Format::ALL.contains(&Format::Hevc) && Format::ALL.len() == 14);
+    let s: ExportSettings = serde_json::from_value(serde_json::json!({"format": "hevc"})).unwrap();
+    assert_eq!(s.format, Format::Hevc);
+    assert_eq!(serde_json::to_value(&s).unwrap()["format"], "hevc");
+
+    // it is H.264's family: MP4 with AAC, or QuickTime; the same size estimate
+    let h = ExportSettings { format: Format::Hevc, ..Default::default() };
+    assert_eq!((h.audio_codec(), h.extension()), (AudioCodec::Aac, "mp4"));
+    assert_eq!(ExportSettings { multiplexer: Multiplexer::Mov, ..h.clone() }.extension(), "mov");
+    // 10 s of 20 Mbps video + 320 kbps AAC ≈ 25.4 MB, like H.264
+    let b = h.estimate_bytes(1920, 1080, FrameRate::FPS_25, 48_000, Tick(10 * TICKS_PER_SECOND));
+    assert!((b as f64 - 25.4e6).abs() < 0.2e6, "{b}");
+    let summary = h.summary(1920, 1080, FrameRate::FPS_25, 48_000, Tick(10 * TICKS_PER_SECOND));
+    assert_eq!(summary.format, "H.265 (HEVC) (MP4)");
+    assert!(summary.video.contains("HEVC Main") && summary.video.contains("Target 20.00 Mbps"), "{}", summary.video);
+
+    // a hardware encoder has one pass
+    let e = ExportSettings { bitrate_mode: BitrateMode::Vbr2Pass, ..h.clone() }.validate().unwrap_err();
+    assert!(e.to_string().contains("two-pass"), "{e}");
+    assert!(ExportSettings { bitrate_mode: BitrateMode::Cbr, ..h.clone() }.validate().is_ok());
+
+    // formats with a built-in encoder are always available; this one only when a registered probe says so
+    assert!(Format::ALL.iter().filter(|f| f.has_builtin_encoder()).all(|f| available(*f)));
+    assert!(!Format::Hevc.has_builtin_encoder());
+    static HERE: AtomicBool = AtomicBool::new(false);
+    fn probe() -> bool {
+        HERE.load(Ordering::SeqCst)
+    }
+    assert!(!available(Format::Hevc), "nothing registered an encoder for it");
+    // and an export says so, honestly
+    let (p, seq, m) = matte([0.0, 0.0, 1.0, 1.0], 160, 90, None);
+    let sc = Scratch::new("h265-missing");
+    let err = export(&p, seq, &ExportSettings { path: sc.path("x.mp4"), include_audio: false, ..h.clone() }, &m, &Progress::default()).unwrap_err().to_string();
+    assert!(err.contains("H.265") && err.contains("encoder not available"), "{err}");
+    register_format_probe(Format::Hevc, probe);
+    register_format_probe(Format::Hevc, probe); // the same probe twice is harmless
+    assert!(!available(Format::Hevc));
+    HERE.store(true, Ordering::SeqCst);
+    assert!(available(Format::Hevc));
+    HERE.store(false, Ordering::SeqCst);
+    assert!(!available(Format::Hevc));
+}
+
+#[test]
+fn extreme_bitrates_do_not_overflow_resolution() {
+    let s = ExportSettings { bitrate_kbps: u32::MAX, adaptive_bitrate: None, ..Default::default() };
+    let resolved = s.resolve(1920, 1080, FrameRate::FPS_30, 48_000);
+    assert_eq!(resolved.target_kbps, u32::MAX);
+    assert_eq!(resolved.max_kbps, u32::MAX);
+}
+
+#[test]
+fn extreme_bitrates_do_not_overflow_encoder_setup() {
+    for max_bitrate_kbps in [None, Some(u32::MAX)] {
+        let settings = ExportSettings { bitrate_kbps: u32::MAX, max_bitrate_kbps, ..Default::default() };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::h264_factory(Format::H264, 64, 36, FrameRate::FPS_24, &settings)));
+        assert!(result.is_ok(), "an extreme bitrate must return an encoder result without overflowing its fallback");
+        assert!(result.unwrap().unwrap().is_err(), "an unrepresentable encoder buffer rate must be rejected");
     }
 }

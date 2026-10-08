@@ -404,6 +404,8 @@ impl Job {
             "id": self.id,
             "label": self.label,
             "progress": self.progress.fraction(),
+            // seconds left at the job's recent speed; null until it can tell
+            "etaSeconds": self.progress.eta().map(|d| d.as_secs_f64()),
             "done": self.progress.done.load(Ordering::Relaxed),
             "total": self.progress.total.load(Ordering::Relaxed),
             "status": self.progress.status.lock().unwrap_or_else(|e| e.into_inner()).clone(),
@@ -779,9 +781,20 @@ impl Session {
 
     /// Edit the active sequence with the edit-algebra context.
     pub fn edit_sequence<R>(&mut self, label: &str, f: impl FnOnce(&mut Sequence, &mut EditCtx, &mut EditorState) -> Result<R>) -> Result<R> {
+        self.edit_sequence_as(label, None, f)
+    }
+
+    /// [`Session::edit_sequence`] that shares one undo step with the previous edit of the same
+    /// `merge` key, like [`Session::edit_merged`] (a drag is one undoable change).
+    pub fn edit_sequence_as<R>(
+        &mut self,
+        label: &str,
+        merge: Option<&str>,
+        f: impl FnOnce(&mut Sequence, &mut EditCtx, &mut EditorState) -> Result<R>,
+    ) -> Result<R> {
         let seq_id = self.state.active_sequence.ok_or(EngineError::NoSequence)?;
         let media = self.media.clone();
-        self.edit(label, move |p, st| {
+        let body = move |p: &mut Project, st: &mut EditorState| {
             let project_snapshot = std::sync::Arc::new(p.clone());
             let snap = project_snapshot.clone();
             let durations = move |id: ItemId| -> Option<Tick> { media_duration(&project_snapshot, &media, id) };
@@ -798,7 +811,11 @@ impl Session {
                 s.check().map_err(EngineError::Other)?;
             }
             Ok(r)
-        })
+        };
+        match merge {
+            Some(key) => self.edit_merged(label, key, body),
+            None => self.edit(label, body),
+        }
     }
 
     pub fn undo(&mut self) -> Option<String> {
@@ -921,7 +938,7 @@ impl Session {
     /// Render the active sequence at the playhead in its working colour space (HDR values kept;
     /// for scopes and analysis).
     pub fn render_program_working(&self, scale: f32) -> Option<filmcraft_render::Image> {
-        let seq = self.state.active_sequence?;
+        let seq = self.renderable_sequence(scale).ok()?;
         let provider = self.media.provider(self.project.clone(), self.services.clone());
         let opts = filmcraft_render::RenderOptions { scale, working_output: true, ..Default::default() };
         Some(filmcraft_render::render_sequence(&self.project, seq, self.playhead(), opts, &provider))
@@ -929,10 +946,37 @@ impl Session {
 
     /// Render the active sequence at the playhead (CPU reference path).
     pub fn render_program(&self, scale: f32) -> Option<filmcraft_render::Image> {
-        let seq = self.state.active_sequence?;
+        self.render_program_at(scale, self.playhead())
+    }
+
+    /// Render the active sequence at `t` (snapped to its frame, as the playhead would be) without
+    /// moving the playhead (CPU reference path). `None` when there is no sequence or the frame
+    /// cannot be rendered at `scale`; [`Session::try_render_program_at`] says why.
+    pub fn render_program_at(&self, scale: f32, t: Tick) -> Option<filmcraft_render::Image> {
+        self.try_render_program_at(scale, t).ok()
+    }
+
+    /// [`Session::render_program_at`], with the reason when nothing can be rendered.
+    pub fn try_render_program_at(&self, scale: f32, t: Tick) -> Result<filmcraft_render::Image> {
+        let seq = self.renderable_sequence(scale)?;
+        let t = self.sequence_rate().snap(t.max(Tick::ZERO));
         let provider = self.media.provider(self.project.clone(), self.services.clone());
         let opts = filmcraft_render::RenderOptions { scale, captions: true, ..Default::default() };
-        Some(filmcraft_render::render_sequence(&self.project, seq, self.playhead(), opts, &provider))
+        Ok(filmcraft_render::render_sequence(&self.project, seq, t, opts, &provider))
+    }
+
+    /// The active sequence, if a frame of it at `scale` is within the image size limits.
+    fn renderable_sequence(&self, scale: f32) -> Result<ItemId> {
+        let id = self.state.active_sequence.ok_or(EngineError::NoSequence)?;
+        let seq = self.project.sequence(id).ok_or(EngineError::NoSequence)?;
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(EngineError::Other(format!("render scale {scale} must be finite and positive")));
+        }
+        let (w, h) = filmcraft_render::output_size(seq, scale);
+        let size = u32::try_from(w).ok().zip(u32::try_from(h).ok());
+        let Some((w, h)) = size else { return Err(EngineError::Other("the requested render frame exceeds the image size limits".into())) };
+        filmcraft_project::validate_frame_size(w, h).map_err(|e| EngineError::Other(format!("cannot render a {w}x{h} frame: {e}")))?;
+        Ok(id)
     }
 }
 
@@ -947,19 +991,31 @@ pub fn media_start(p: &Project, id: ItemId) -> Tick {
 
 /// Media duration of an item (None for stills/adjustment layers = unlimited handles).
 pub fn media_duration(p: &Project, _pool: &MediaPool, id: ItemId) -> Option<Tick> {
-    let it = p.item(id)?;
-    match &it.kind {
-        filmcraft_project::ItemKind::Media(m) => match m.info.kind {
-            filmcraft_media::MediaKind::Still | filmcraft_media::MediaKind::Synthetic => None,
-            _ => Some(m.info.duration),
-        },
-        filmcraft_project::ItemKind::Sequence(s) => Some(s.duration()),
-        // a subclip that restricts trims ends at its Out point; otherwise its parent's media is the limit
-        filmcraft_project::ItemKind::Subclip { range, restrict_trims: true, .. } => Some(range.end()),
-        filmcraft_project::ItemKind::Subclip { parent, .. } => media_duration(p, _pool, *parent),
-        filmcraft_project::ItemKind::AdjustmentLayer { .. } | filmcraft_project::ItemKind::Graphic { .. } => None,
+    // a subclip's limit is its parent's: follow the chain, bounded (a damaged project file can make
+    // it cyclic or arbitrarily deep)
+    let mut id = id;
+    for _ in 0..=MAX_SUBCLIP_CHAIN {
+        let it = p.item(id)?;
+        return match &it.kind {
+            filmcraft_project::ItemKind::Media(m) => match m.info.kind {
+                filmcraft_media::MediaKind::Still | filmcraft_media::MediaKind::Synthetic => None,
+                _ => Some(m.info.duration),
+            },
+            filmcraft_project::ItemKind::Sequence(s) => Some(s.duration()),
+            // a subclip that restricts trims ends at its Out point; otherwise its parent's media is the limit
+            filmcraft_project::ItemKind::Subclip { range, restrict_trims: true, .. } => Some(range.end()),
+            filmcraft_project::ItemKind::Subclip { parent, .. } => {
+                id = *parent;
+                continue;
+            }
+            filmcraft_project::ItemKind::AdjustmentLayer { .. } | filmcraft_project::ItemKind::Graphic { .. } => None,
+        };
     }
+    None
 }
+
+/// Subclips of subclips followed before giving up (real projects nest one or two deep).
+const MAX_SUBCLIP_CHAIN: usize = 16;
 
 #[cfg(test)]
 mod aaf_omf_tests;

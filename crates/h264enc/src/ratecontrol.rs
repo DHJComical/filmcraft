@@ -101,7 +101,11 @@ pub struct RateControl {
     model_done: f64,
     inflight: std::collections::VecDeque<f64>,
     last_q: f64,
+    /// Virtual history for 1-pass ABR: (frame count, complexity of one virtual frame), fixed at the first frame.
     prior: Option<(f64, f64)>,
+    /// Sum and count of the rate-model terms (`coef · cplx^QCOMP / type_factor`) of the coded P and B frames.
+    inter_s: f64,
+    inter_n: u64,
 }
 
 impl RateControl {
@@ -124,6 +128,8 @@ impl RateControl {
             inflight: std::collections::VecDeque::new(),
             last_q: 0.0,
             prior: None,
+            inter_s: 0.0,
+            inter_n: 0,
         }
     }
 
@@ -173,16 +179,16 @@ impl RateControl {
                 let bpf = *kbps as f64 * 1000.0 / self.fps;
                 // rate factor so that past frames at this rf would have hit the target
                 let s_here = self.coef[ti] * cplx.powf(QCOMP) / type_factor(t);
-                // Virtual history of one second of P frames (inter cost ~ 40% of the first frame's) so the first
-                // I frame gets a realistic share of the budget instead of a single frame's worth.
-                let (fps, coef1) = (self.fps, self.coef[1]);
-                let (pn0, ps0) = *self.prior.get_or_insert_with(|| {
-                    let n = fps.max(1.0);
-                    let c0 = if t == SliceType::I { 0.4 * cplx } else { cplx };
-                    (n, n * coef1 * c0.powf(QCOMP))
-                });
+                // Virtual history of one second of inter frames so the first I frame gets a realistic share of the
+                // budget instead of a single frame's worth. A virtual frame costs what the P and B frames coded so far
+                // cost on average; before the first of them, a P frame of 40% of the first frame's complexity under
+                // the current model. Re-estimated every frame: the initial guess of `coef` can be several times off,
+                // and a history frozen at that guess starves the opening second of bits.
+                let fps = self.fps;
+                let (pn0, c0) = *self.prior.get_or_insert_with(|| (fps.max(1.0), if t == SliceType::I { 0.4 * cplx } else { cplx }));
+                let per_frame = if self.inter_n > 0 { self.inter_s / self.inter_n as f64 } else { self.coef[1] * c0.powf(QCOMP) };
                 let fade = (1.0 - self.frames as f64 / pn0).max(0.0);
-                let (pn, ps) = (pn0 * fade, ps0 * fade);
+                let (pn, ps) = (pn0 * fade, pn0 * fade * per_frame);
                 let s = self.sum_s + s_here + ps;
                 let wanted = bpf * (self.frames as f64 + 1.0 + pn);
                 let mut rf = s / wanted;
@@ -242,7 +248,12 @@ impl RateControl {
                 self.coef[k] = self.coef[ti] * [1.2, 1.0, 0.85][k] / [1.2, 1.0, 0.85][ti];
             }
         }
-        self.sum_s += self.coef[ti] * cplx.powf(QCOMP) / type_factor(t);
+        let s_frame = self.coef[ti] * cplx.powf(QCOMP) / type_factor(t);
+        self.sum_s += s_frame;
+        if t != SliceType::I {
+            self.inter_s += s_frame;
+            self.inter_n += 1;
+        }
         self.total_bits += bits as f64;
         if let Some(p) = self.inflight.pop_front() {
             self.model_done += p;

@@ -187,6 +187,32 @@ fn abr_hits_target() {
     }
 }
 
+/// 1-pass VBR must not starve the opening second of a 60 fps export (#74): the rate model's initial guess
+/// is several times too pessimistic, and a virtual history frozen at that guess kept the pictures after the
+/// first one 6–9 dB below the rest until it faded out after one second.
+#[test]
+fn vbr_opening_second_is_not_starved() {
+    if ffmpeg().is_none() {
+        return;
+    }
+    let (w, h, n, fps) = (640, 360, 120, 60);
+    let frames: Vec<Yuv> = (0..n).map(|t| synth(w, h, t)).collect();
+    let mut c = cfg(w, h, Profile::High, Preset::Balanced, 2, RateControl::Vbr { target_kbps: 2000, max_kbps: 3000 }, 0);
+    c.fps_num = fps;
+    c.keyint = 2 * fps;
+    let run = encode(c, &frames);
+    let dec = verify("vbr_opening", &run, w, h, n);
+    let fs = w * h * 3 / 2;
+    let ps: Vec<f64> = frames.iter().enumerate().map(|(i, f)| psnr(&dec[i * fs..i * fs + w * h], &f.y)).collect();
+    let mean = |r: std::ops::Range<usize>| ps[r.clone()].iter().sum::<f64>() / r.len() as f64;
+    // 0.1–0.5 s against everything after the first second (the same GOP, so no new I frame in between).
+    let (opening, settled) = (mean(6..30), mean(60..n));
+    let kbps = run.stream.len() as f64 * 8.0 / (n as f64 / fps as f64) / 1000.0;
+    eprintln!("opening {opening:.2} dB, after 1 s {settled:.2} dB, {kbps:.1} kbps");
+    assert!(settled - opening <= 3.0, "opening second starved: {opening:.2} dB vs {settled:.2} dB after 1 s");
+    assert!((kbps - 2000.0).abs() / 2000.0 <= 0.10, "{kbps:.1} kbps vs target 2000");
+}
+
 #[test]
 fn two_pass_vbr_hits_target() {
     if ffmpeg().is_none() {

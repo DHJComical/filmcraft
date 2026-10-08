@@ -183,8 +183,15 @@ pub fn item_interactions(
         actions.push(("project.select".into(), json!({"items": sel.iter().map(|i| i.0).collect::<Vec<_>>()})));
     }
     if resp.double_clicked() {
-        let cmd = if matches!(kind, ItemKind::Sequence(_)) { "sequence.open" } else { "source.open" };
-        actions.push((cmd.into(), json!({"item": id.0})));
+        let matte = matches!(kind, ItemKind::Media(m) if matches!(m.media, filmcraft_engine::project::MediaRef::Generator(filmcraft_media::Generator::ColorMatte { .. })));
+        if matte {
+            // like Premiere: double-clicking a Color Matte opens its color picker
+            actions.push(("project.select".into(), json!({"items": [id.0]})));
+            actions.push(("project.matteColor".into(), json!({})));
+        } else {
+            let cmd = if matches!(kind, ItemKind::Sequence(_)) { "sequence.open" } else { "source.open" };
+            actions.push((cmd.into(), json!({"item": id.0})));
+        }
     }
     if drag && resp.drag_started() {
         crate::panels::start_drag_item(ui, id);

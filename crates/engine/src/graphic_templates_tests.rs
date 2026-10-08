@@ -363,3 +363,20 @@ fn caption_formats_through_the_engine() {
         }
     }
 }
+
+/// #188: a copied Graphic clip pastes at the playhead as a second Graphic clip.
+#[test]
+fn copy_paste_duplicates_a_graphic_clip() {
+    let mut s = demo("gt-paste");
+    let c = clip_of(&s.execute("graphics.newText", json!({"text": "Lyric", "seconds": 2})).unwrap());
+    s.execute("timeline.select", json!({"clips": [c.0]})).unwrap();
+    let v = s.execute("edit.copy", json!({})).unwrap();
+    assert_eq!(v["copied"], 1, "{v}");
+    s.execute("playhead.set", json!({"seconds": 620})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    let q = s.active_sequence().unwrap();
+    let pasted: Vec<&TrackItem> = q.all_tracks().flat_map(|t| t.items.iter()).filter(|i| i.id != c && i.item == item(&s, c).item).collect();
+    assert_eq!(pasted.len(), 1, "one copy");
+    assert!((pasted[0].start.seconds() - 620.0).abs() < 0.05, "at the playhead: {:?}", pasted[0].start);
+    assert_eq!(texts(&s, pasted[0].id), vec!["Lyric".to_string()]);
+}

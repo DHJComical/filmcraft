@@ -72,7 +72,7 @@ and `filmcraft-cli`.
 | `engine` | L4 | `Session`, command registry, undo history, media pool, jobs, interchange glue |
 | `ui-egui` | L5 | the egui frontend: docking, panels, timeline, monitors, playback, control-channel handlers |
 | `automation` | L5 | MCP server (`rmcp`, stdio), headless or bridged to the running app |
-| `platform` | L5 | OS media FFI only: hardware video decoding (VideoToolbox H.264 / HEVC on macOS; a no-op elsewhere) behind `codecs::VideoDecoder`, with transparent fallback to our decoders. The one crate allowed `unsafe` ([ADR 0001](adr/0001-platform-ffi.md), [README](../crates/platform/README.md)) |
+| `platform` | L5 | OS media FFI only: hardware video decoding (VideoToolbox H.264 / HEVC on macOS; Media Foundation / Direct3D 11 H.264 / HEVC on Windows; a no-op elsewhere) behind `codecs::VideoDecoder`, with transparent fallback to our decoders, and hardware H.264 encoding (VideoToolbox, opt-in) and H.265 encoding (VideoToolbox, the only H.265 encoder; the format exists only where a hardware encoder does) and NVIDIA NVENC H.264 encoding (Windows, opt-in) behind `export::VideoEncoder`; H.264 declines to the built-in encoder for what the hardware does not take. The one crate allowed `unsafe` ([ADR 0001](adr/0001-platform-ffi.md), [README](../crates/platform/README.md)) |
 | `filmcraft` | L6 | desktop binary: eframe/wgpu window, cpal audio output, file dialogs, native macOS menu, TCP control server |
 | `filmcraft-cli` | L6 | headless CLI: `exec`, `run`, `inspect`, `describe`, `commands`, `import`, `export`, `render`, `probe`, `mcp`; `--bridge` targets the running app |
 | `filmcraft-web` | L6 | the browser app (wasm32): eframe web runner on WebGPU/WebGL2, Blob-backed services, OPFS recovery, WebAudio, WebCodecs, `window.filmcraft` API ([web.md](web.md)) |
@@ -200,7 +200,7 @@ pub struct CommandSpec {
 ```text
 file ──► codecs (MP4/MOV, MKV, audio)        demux + decode, GOP-aware seek
           │   decoder registry: h264, hevc, vp9, av1, prores, dnx, mjpeg (+ any registered first:
-          │   platform's VideoToolbox H.264 / HEVC on macOS, falling back to ours)
+          │   platform's VideoToolbox (macOS) or Media Foundation (Windows) H.264 / HEVC, falling back to ours)
           ▼
         media::MediaSource ──► frame cache (byte-budgeted LRU, shared)
           ▼
@@ -231,7 +231,8 @@ file ──► codecs (MP4/MOV, MKV, audio)        demux + decode, GOP-aware see
   hardware decoder can take precedence. The GOP cache never holds its lock while decoding.
 - **Hardware decoding.** The apps (desktop, CLI / headless MCP, bench) call
   `filmcraft_platform::register()` at startup, which on macOS registers a VideoToolbox factory for
-  `avcC` / `hvcC` streams (8 / 10-bit, 4:2:0 and 4:2:2; elsewhere it does nothing). The factory
+  `avcC` / `hvcC` streams (8 / 10-bit, 4:2:0 and 4:2:2; elsewhere it does nothing), and on Windows a
+  Media Foundation one (below). The factory
   declines (our decoder is used) when Settings ▸ Playback ▸ Hardware decoding is Off
   (`codecs::hw::set_hardware_decoding`, applied by the engine whenever preferences change), for
   formats it does not take, and when the OS cannot create a *hardware* session for the stream.
@@ -246,10 +247,33 @@ file ──► codecs (MP4/MOV, MKV, audio)        demux + decode, GOP-aware see
   `codecs::software_video_decoder` (built-in factories only), replays the samples since the last
   restart point and continues in software for that instance; it is logged and counted. A source
   already open keeps its decoder when the setting changes, until it is reopened. `perf.stats`
-  `decode.hardware` reports hardware vs software frames, sessions, declines and fallbacks.
+  `decode.hardware` reports hardware vs software frames, sessions, declines and fallbacks, and the
+  registered `backend`.
+  On Windows the decoder (`platform::media_foundation`) is a Direct3D-aware decoder MFT driven at
+  the level of single access units (no Source Reader: the demuxer above already delivers the
+  samples): the `avcC` / `hvcC` sample becomes Annex B, the MFT is given the process's Direct3D 11
+  video device through an `IMFDXGIDeviceManager` so it decodes with DXVA, and its NV12 (8-bit) /
+  P010 (10-bit) texture is read back through a staging texture (the one GPU to CPU copy) into
+  planar `Yuv8` / `Yuv16`. H.264 Baseline / Main / High, HEVC Main / Main 10, VP9 profiles 0 / 2 and AV1 main
+  (8- and 10-bit), 4:2:0, progressive (VP9 / AV1 samples go in as they are, not as Annex B);
+  everything else, and any stream the GPU's DXVA decoder does not list, is declined. A decoder that
+  would hand back system-memory pictures (Microsoft's decoder MFTs do that when DXVA is not
+  available) fails the stream, so the hybrid continues with our decoder and Windows' software
+  decoding is never used in its place. Zero-copy (the texture straight to wgpu) is not done yet.
   Decoders run slices on rayon, so an export worker waiting inside a decode can pick up another
   frame of the same source. A request that finds the shared decoder busy decodes with a private
   decoder.
+- **Hardware encoding.** On Windows, `platform::nvenc::export::factory` is registered with
+  `filmcraft_export::register_encoder` (`register()` does this once), in front of the software H.264
+  encoder. It takes an export only when Export ▸ Hardware encoding (`ExportSettings.hardwareEncoding`,
+  `HardwareEncoding::Auto`) is Auto, which is off by default: hardware streams differ from ours, and
+  exports are otherwise byte-identical from run to run. NVENC (`platform::nvenc`, the driver's
+  `nvEncodeAPI64.dll` loaded at run time) then takes RGBA frames, converted to 4:2:0 by the software
+  encoder's own conversion, and produces the H.264 samples and `avcC` of an MP4 / MOV. It declines
+  (the software encoder runs, counted in `export.hardware.declined`) two-pass VBR, HDR, MXF,
+  interlaced output, sizes outside NVENC's limits, and systems without an NVIDIA GPU or driver.
+  A failure during an export ends it with an error: the software encoder cannot take over a hardware
+  stream.
 - **Compositor.** `render` is the reference for monitors, thumbnails and export. `render::plan`
   turns a frame into GPU layers, each with its opacity and blend mode. All 27 blend modes run on the
   GPU (`filmcraft-gpu`): Normal and Dissolve with fixed-function "over" blending, the others by
@@ -272,6 +296,19 @@ file ──► codecs (MP4/MOV, MKV, audio)        demux + decode, GOP-aware see
   and handed to the GPU as an image (a layer image keeps its clip's blend mode), so both paths
   give the same picture. Setting `FILMCRAFT_CPU_COMPOSITE=1`
   forces the CPU path in the desktop app.
+- **CPU compositor shortcuts.** The CPU compositor, which is what export runs, works on
+  premultiplied linear `f32` images, 33 MB at 1080p, so what it does not allocate, convert or mix
+  is time saved. Three shortcuts, each of which gives the general path's bits (compared bit for
+  bit, with every blend mode, in `render/src/region_tests.rs`): the canvas stays unallocated
+  until a layer needs it, and an opaque bottom layer (an 8-bit or 16-bit Y'CbCr frame without an
+  alpha plane, opacity 100 %, Normal) simply becomes the canvas; a plain media frame with an alpha
+  plane (a ProRes 4444 banner) is converted and mixed only inside the rectangle where its alpha is
+  not zero (`VideoFrame::alpha_region`, `to_linear_f32_region`, `blend::composite_at`), the rest
+  being transparent anyway; and working images are recycled through `filmcraft_frame::pool`
+  (`take_f32_overwritten` / `recycle_f32`: the buffer comes back with its old contents, so there is
+  no zero-fill) by the export pipeline once a frame is converted to 8 bits. A clip with effects,
+  opacity masks, frame blending, colour management, or a picture that is not placed one to one on
+  the output takes the general path.
 - **Frame scheduling.** `crates/ui-egui/src/frames.rs` runs a small pool of worker threads with
   prioritised jobs: the frame on screen first, then playback prefetch, then thumbnails. The UI never
   decodes. It shows the exact frame when it is ready and holds the nearest cached frame meanwhile.

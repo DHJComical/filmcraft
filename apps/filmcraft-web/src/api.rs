@@ -170,11 +170,11 @@ pub fn install() -> Result<(), JsValue> {
         &obj,
         "readFile",
         Closure::<dyn Fn(String) -> js_sys::Promise>::new(|path: String| {
-            future_to_promise(async move {
+            future_to_promise(caught(async move {
                 let blob = crate::fs::blob(&path).ok_or_else(|| JsValue::from_str(&format!("{path}: not found")))?;
                 let buf = JsFuture::from(blob.array_buffer()).await?;
                 Ok(js_sys::Uint8Array::new(&buf).into())
-            })
+            }))
         })
         .into_js_value(),
     )?;
@@ -191,10 +191,10 @@ pub fn install() -> Result<(), JsValue> {
         &obj,
         "importUrl",
         Closure::<dyn Fn(String, JsValue) -> js_sys::Promise>::new(|url: String, name: JsValue| {
-            future_to_promise(async move {
+            future_to_promise(caught(async move {
                 let f = fetch_file(&url, name.as_string()).await?;
                 Ok(to_js(&crate::import::import_files(vec![f]).await))
-            })
+            }))
         })
         .into_js_value(),
     )?;
@@ -202,17 +202,33 @@ pub fn install() -> Result<(), JsValue> {
         &obj,
         "openProject",
         Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(|src: JsValue| {
-            future_to_promise(async move {
+            future_to_promise(caught(async move {
                 let file = match src.as_string() {
                     Some(url) => fetch_file(&url, None).await?,
                     None => files_of(&src).into_iter().next().ok_or("need a File or URL")?,
                 };
                 crate::import::open_project_file(file).await.map(|v| to_js(&v)).map_err(|e| JsValue::from(js_sys::Error::new(&e)))
-            })
+            }))
         })
         .into_js_value(),
     )?;
     let w = web_sys::window().ok_or("no window")?;
     js_sys::Reflect::set(&w, &"filmcraft".into(), &obj)?;
     Ok(())
+}
+
+/// `f`, rejecting with an [`as_error`] `Error`.
+async fn caught(f: impl std::future::Future<Output = Result<JsValue, JsValue>>) -> Result<JsValue, JsValue> {
+    f.await.map_err(as_error)
+}
+
+/// Every member rejects with an `Error` (#90), as `execute` and `request` do, so `e.message` and
+/// `e instanceof Error` work: a plain string (a fetch status, "not found") becomes one, and an
+/// `Error` passes through unchanged.
+fn as_error(e: JsValue) -> JsValue {
+    if e.is_instance_of::<js_sys::Error>() {
+        return e;
+    }
+    let msg = e.as_string().unwrap_or_else(|| format!("{e:?}"));
+    js_sys::Error::new(&msg).into()
 }

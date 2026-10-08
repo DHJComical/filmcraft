@@ -370,11 +370,7 @@ fn targets(s: &Session, p: &Value) -> Vec<ItemId> {
 
 /// The media clip behind an item (subclips resolve to their parent).
 fn media_of(p: &Project, id: ItemId) -> Option<(ItemId, &filmcraft_project::MediaClip)> {
-    match &p.item(id)?.kind {
-        ItemKind::Media(m) => Some((id, m)),
-        ItemKind::Subclip { parent, .. } => media_of(p, *parent),
-        _ => None,
-    }
+    p.resolve_media(id).map(|(root, media, _)| (root, media))
 }
 
 fn file_path(m: &filmcraft_project::MediaClip) -> Option<&str> {

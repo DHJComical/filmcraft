@@ -38,6 +38,38 @@ fn track_clips(s: &Session, i: usize) -> Vec<filmcraft_project::TrackItem> {
 }
 
 #[test]
+fn a_failed_recording_save_keeps_the_take_for_retry() {
+    let (mut s, track, index) = demo();
+    s.execute("playhead.set", json!({"seconds":0})).unwrap();
+    s.execute("audio.voiceover.start", json!({"track":track, "preroll":0})).unwrap();
+    let dir = tmp("save-retry");
+    std::fs::write(&dir, b"not a directory").unwrap();
+    assert!(s.execute("audio.voiceover.stop", json!({"time":sec(1.0),"dir":dir})).is_err());
+    assert!(s.voiceover.recording(), "failed save must retain the recording for retry");
+    assert!(s.execute("audio.voiceover.sync", json!({"time":sec(1.5)})).is_err(), "playback must not discard an unsaved take");
+    std::fs::remove_file(&dir).unwrap();
+    let result = s.execute("audio.voiceover.stop", json!({"time":sec(2.0),"dir":dir})).unwrap();
+    assert_eq!(result["samples"], 48000, "retry preserves the stopped take's end point");
+    assert_eq!(result["placed"], true);
+    assert!(!s.voiceover.recording());
+    assert_eq!(track_clips(&s, index).len(), 1);
+    let audio = mix(&s, 0, 48000);
+    assert!(audio[0][0] > 0.49, "retry retained the first captured sample");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn hostile_record_points_and_preroll_are_bounded() {
+    let (mut s, track, _) = demo();
+    assert!(s.execute("audio.voiceover.start", json!({"track":track,"time":-1,"preroll":1e300})).is_err());
+    assert!(!s.voiceover.recording());
+    let result = s.execute("audio.voiceover.start", json!({"track":track,"time":sec(120.0),"preroll":1e300})).unwrap();
+    assert_eq!(result["captureStart"], sec(60.0));
+    assert!(result["cues"].as_array().unwrap().len() <= 61);
+    s.execute("audio.voiceover.stop", json!({"discard":true})).unwrap();
+}
+
+#[test]
 fn commands_are_registered_and_disabled_without_a_recording() {
     for id in ["audio.voiceover.settings", "audio.voiceover.start", "audio.voiceover.sync", "audio.voiceover.stop"] {
         let c = commands::find(id).unwrap_or_else(|| panic!("{id} missing"));

@@ -3376,3 +3376,56 @@
 	in	entrada
 	The language changed but could not be saved: {e}	El idioma ha cambiado, pero no se ha podido guardar: {e}
 	no Japanese font is installed on this system; the interface stays in English	no hay ninguna fuente japonesa instalada en este sistema; la interfaz sigue en inglés
+	Show	Mostrar
+	Sort	Ordenar
+	Reverse the order	Invertir el orden
+	Grab bag	Mosaico
+	Table	Tabla
+	No contributor data was built into this copy.	Esta copia no incluye datos de colaboradores.
+	No model credits were built into this copy.	Esta copia no incluye créditos de modelos.
+	Company	Empresa
+	Model	Modelo
+	Version	Versión
+	Commits	Commits
+	% of all commits	% de todos los commits
+	Lines +/−	Líneas +/−
+	Audio output failed: playing without sound (check Settings ▸ Audio Hardware)	La salida de audio ha fallado: se reproduce sin sonido (revisa Ajustes ▸ Hardware de audio)
+	Audio output is not responding: playing without sound (check Settings ▸ Audio Hardware)	La salida de audio no responde: se reproduce sin sonido (revisa Ajustes ▸ Hardware de audio)
+	Clip Speed / Duration	Velocidad/duración del clip
+	Speed:	Velocidad:
+	Reverse Speed	Invertir velocidad
+	Ripple Edit, Shifting Trailing Clips	Edición de rizo, desplazando los clips posteriores
+	About	Acerca de
+	Contributors	Colaboradores
+	Models	Modelos
+	Main (8-bit)	Main (8 bits)
+	Encoder	Codificador
+	Hardware (H.265 has no software encoder)	Hardware (H.265 no tiene codificador por software)
+	Text Properties	Propiedades de texto
+	Text Box Height	Altura del cuadro de texto
+	Paragraph Text	Texto de párrafo
+	Point Text	Texto de punto
+	Text Layer Type	Tipo de capa de texto
+	Text Styling	Estilo de texto
+	New Color Matte	Nuevo mate de color
+	Color Matte Color	Color del mate de color
+	Color:	Color:
+	 · {time} left	 · quedan {time}
+	Discard take	Descartar toma
+	Voice-over take discarded	Toma de voz en off descartada
+	Binary assets added	Recursos binarios añadidos
+	Binary assets removed	Recursos binarios eliminados
+	Deselect All Project Items	Deseleccionar todos los elementos del proyecto
+	Display name	Nombre visible
+	First commit	Primer commit
+	H.265 (HEVC)	H.265 (HEVC)
+	Last commit	Último commit
+	Line delta	Diferencia de líneas
+	Lines added	Líneas añadidas
+	Lines deleted	Líneas eliminadas
+	Merged PRs	PR fusionados
+	Name (A–Z)	Nombre (A–Z)
+	Real name	Nombre real
+	Select All Project Items	Seleccionar todos los elementos del proyecto
+	Username	Nombre de usuario
+	Vertical Type Tool	Herramienta Texto vertical

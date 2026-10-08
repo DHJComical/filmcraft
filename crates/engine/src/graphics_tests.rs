@@ -369,7 +369,171 @@ fn new_layer_from_file_places_the_image_above() {
     assert_eq!(it.start, q.settings.frame_rate.snap(t));
     let ti = q.video_tracks.iter().position(|tr| tr.id == tid).unwrap();
     assert!(q.video_tracks[..ti].iter().any(|tr| tr.item_at(t).is_some()), "above the footage");
+    // the anchor is the picture's centre, not the frame's, so `position` places the picture
+    let anchor = it.effect("motion").unwrap().vec2_at("anchor", Tick::ZERO);
+    assert_eq!((anchor.x, anchor.y), (w as f64 / 2.0, h as f64 / 2.0));
     assert_eq!(s.state.selection, vec![clip]);
     assert!(s.execute("graphics.newFromFile", json!({})).is_err());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Where each line of text layer `layer` starts on the canvas (the left end of its baseline),
+/// with the line's text.
+fn line_starts(s: &Session, clip: ClipId, layer: usize) -> Vec<(String, f64, f64)> {
+    let spec = layers(s, clip).remove(layer);
+    let LayerContent::Text(t) = &spec.content else { panic!("not text") };
+    let l = filmcraft_render::graphic_clip::text_layout(t);
+    let m = filmcraft_render::graphic_clip::layer_matrix(&spec);
+    l.lines
+        .iter()
+        .map(|line| {
+            let p = m.apply(filmcraft_geom::Vec2::new(line.x as f64, line.baseline as f64));
+            (t.text[line.range.clone()].trim_end().to_string(), p.x, p.y)
+        })
+        .collect()
+}
+
+fn same_places(a: &[(String, f64, f64)], b: &[(String, f64, f64)]) {
+    assert_eq!(a.len(), b.len(), "{a:?} vs {b:?}");
+    for (x, y) in a.iter().zip(b) {
+        assert_eq!(x.0, y.0);
+        assert!((x.1 - y.1).abs() < 0.05 && (x.2 - y.2).abs() < 0.05, "line `{}` moved: {x:?} -> {y:?}", x.0);
+    }
+}
+
+const FOX: &str = "The quick brown fox jumps over the lazy dog";
+
+#[test]
+fn paragraph_text_wraps_in_its_box_and_hides_what_does_not_fit() {
+    let mut s = demo();
+    let r = s.execute("graphics.newText", json!({"text": FOX, "position": [270, 583], "box": [500, 150], "size": 60})).unwrap();
+    let clip = ClipId(r["clip"].as_u64().unwrap());
+    let list = s.execute("graphics.list", json!({"clip": clip.0})).unwrap();
+    let l = &list["layers"][0];
+    assert_eq!(l["textType"], "paragraph");
+    assert_eq!(l["box"], json!([500.0, 150.0]));
+    assert_eq!(l["overflow"], true, "three lines of 60 px text do not fit 150 px");
+    assert_eq!(l["localBounds"], json!([0.0, 0.0, 500.0, 150.0]), "the box is the layer's bounds");
+    assert_eq!(l["quad"][0], json!([270.0, 583.0]), "the position is the box's top-left corner");
+    assert_eq!(l["quad"][2], json!([770.0, 733.0]));
+    let shown = line_starts(&s, clip, 0);
+    assert_eq!(shown.len(), 2, "{shown:?}");
+    assert!(shown.iter().all(|(_, x, _)| (*x - 270.0).abs() < 8.0), "lines start at the box's left edge: {shown:?}");
+
+    // a taller box shows everything; the font size and scale are untouched
+    s.execute("graphics.set", json!({"clip": clip.0, "props": {"boxHeight": 400}})).unwrap();
+    let list = s.execute("graphics.list", json!({"clip": clip.0})).unwrap();
+    assert_eq!(list["layers"][0]["overflow"], false);
+    assert_eq!(list["layers"][0]["scale"], 100.0);
+    assert!(line_starts(&s, clip, 0).len() >= 3);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.execute("graphics.list", json!({"clip": clip.0})).unwrap()["layers"][0]["overflow"], true);
+
+    // point text has no box, and a vertical layer never gets one
+    let r = s.execute("graphics.newText", json!({"text": "Title", "newClip": true, "track": 3})).unwrap();
+    let point = s.execute("graphics.list", json!({"clip": r["clip"]})).unwrap();
+    assert_eq!(point["layers"][0]["textType"], "point");
+    assert_eq!(point["layers"][0]["box"], json!(null));
+    let r = s.execute("graphics.newText", json!({"text": "Tate", "vertical": true, "box": [300, 300], "newClip": true, "track": 4})).unwrap();
+    assert_eq!(s.execute("graphics.list", json!({"clip": r["clip"]})).unwrap()["layers"][0]["textType"], "point");
+}
+
+#[test]
+fn text_type_converts_both_ways_and_keeps_the_text_in_place() {
+    for align in ["left", "center", "right"] {
+        let mut s = demo();
+        let r = s.execute("graphics.newText", json!({"text": FOX, "position": [270, 400], "box": [500, 150], "size": 60})).unwrap();
+        let clip = ClipId(r["clip"].as_u64().unwrap());
+        // scaled and turned, so that the anchor arithmetic matters
+        s.execute("graphics.set", json!({"clip": clip.0, "props": {"align": align, "scale": 150, "scale_width": 150, "rotation": 20}})).unwrap();
+        let hidden = line_starts(&s, clip, 0);
+        assert_eq!(hidden.len(), 2, "the box hides the third line");
+        s.execute("graphics.set", json!({"clip": clip.0, "props": {"boxHeight": 0}})).unwrap();
+        let before = line_starts(&s, clip, 0);
+        assert!(before.len() >= 3);
+        s.execute("edit.undo", json!({})).unwrap();
+        let position = layers(&s, clip)[0].transform.position;
+
+        // paragraph → point: every line stays where it was, also the hidden one
+        let r = s.execute("graphics.setTextType", json!({"clip": clip.0, "type": "point"})).unwrap();
+        assert_eq!(r, json!({"clip": clip.0, "layer": 0, "type": "point", "changed": true}));
+        let list = s.execute("graphics.list", json!({"clip": clip.0})).unwrap();
+        assert_eq!(list["layers"][0]["textType"], "point", "{align}");
+        let spec = layers(&s, clip).remove(0);
+        assert_eq!(text_of(&spec).lines().count(), before.len(), "the wrapped lines became real lines: {:?}", text_of(&spec));
+        assert_eq!(text_of(&spec).replace('\n', " "), FOX, "nothing but the line breaks changed");
+        assert_eq!(spec.transform.position, position, "the layer's position is untouched ({align})");
+        assert!(spec.transform.anchor.y < -1.0, "the anchor, still on the box's old corner, is above the first baseline: {:?}", spec.transform.anchor);
+        same_places(&before, &line_starts(&s, clip, 0));
+        // again: nothing to do
+        assert_eq!(s.execute("graphics.setTextType", json!({"clip": clip.0, "type": "Point Text"})).unwrap()["changed"], false);
+
+        // point → paragraph: a box fitted to the text, which still does not move
+        s.execute("graphics.setTextType", json!({"clip": clip.0, "type": "paragraph"})).unwrap();
+        let list = s.execute("graphics.list", json!({"clip": clip.0})).unwrap();
+        let l = &list["layers"][0];
+        assert_eq!(l["textType"], "paragraph");
+        assert_eq!(l["overflow"], false, "the fitted box shows every line");
+        let widest = 500.0;
+        assert!(l["box"][0].as_f64().unwrap() <= widest + 2.0 && l["box"][0].as_f64().unwrap() > 200.0, "{}", l["box"]);
+        let spec = layers(&s, clip).remove(0);
+        assert_eq!(spec.transform.position, position);
+        // the anchor is level with the box's top again; the fitted box is narrower than the old
+        // one, so centred and right-aligned text leave the anchor to its left
+        let a = spec.transform.anchor;
+        assert!(a.y.abs() < 1e-3 && a.x < 1e-3 && (align != "left" || a.x.abs() < 1e-3), "{align}: {a:?}");
+        same_places(&before, &line_starts(&s, clip, 0));
+
+        // each conversion is one undo step
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(s.execute("graphics.list", json!({"clip": clip.0})).unwrap()["layers"][0]["textType"], "point");
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(s.execute("graphics.list", json!({"clip": clip.0})).unwrap()["layers"][0]["textType"], "paragraph");
+        same_places(&hidden, &line_starts(&s, clip, 0));
+        s.execute("edit.redo", json!({})).unwrap();
+        same_places(&before, &line_starts(&s, clip, 0));
+    }
+}
+
+#[test]
+fn text_type_refuses_what_it_cannot_convert() {
+    let mut s = Session::default();
+    assert!(s.execute("graphics.setTextType", json!({"type": "point"})).is_err(), "no sequence");
+    let mut s = demo();
+    let r = s.execute("graphics.newText", json!({"text": "Title"})).unwrap();
+    let clip = r["clip"].as_u64().unwrap();
+    assert!(s.execute("graphics.setTextType", json!({"clip": clip})).is_err(), "no type");
+    assert!(s.execute("graphics.setTextType", json!({"clip": clip, "type": "wavy"})).is_err());
+    s.execute("graphics.newShape", json!({"shape": "ellipse", "clip": clip})).unwrap();
+    let e = s.execute("graphics.setTextType", json!({"clip": clip, "layer": 1, "type": "paragraph"})).unwrap_err();
+    assert!(e.to_string().contains("not a text layer"), "{e}");
+    s.execute("graphics.newText", json!({"text": "Tate", "vertical": true, "clip": clip})).unwrap();
+    let e = s.execute("graphics.setTextType", json!({"clip": clip, "layer": 2, "type": "paragraph"})).unwrap_err();
+    assert!(e.to_string().contains("vertical"), "{e}");
+    // a point-text layer keeps its own line breaks when it gets a box
+    s.execute("graphics.setText", json!({"clip": clip, "layer": 0, "text": "one\ntwo words\n\nfour"})).unwrap();
+    let before = line_starts(&s, ClipId(clip), 0);
+    s.execute("graphics.setTextType", json!({"clip": clip, "layer": 0, "type": "paragraph"})).unwrap();
+    same_places(&before, &line_starts(&s, ClipId(clip), 0));
+    s.execute("graphics.setTextType", json!({"clip": clip, "layer": 0, "type": "point"})).unwrap();
+    assert_eq!(text_of(&layers(&s, ClipId(clip))[0]), "one\ntwo words\n\nfour");
+}
+
+#[test]
+fn a_layer_saved_before_the_box_height_existed_can_still_get_one() {
+    let mut s = demo();
+    let r = s.execute("graphics.newText", json!({"text": FOX, "box": [500, 150], "size": 60})).unwrap();
+    let clip = ClipId(r["clip"].as_u64().unwrap());
+    s.edit_sequence("old file", |q, _, _| {
+        let (_, it) = q.find_item_mut(clip).unwrap();
+        let ei = layer_indices(&it.effects)[0];
+        it.effects[ei].params.remove("box_height");
+        Ok(())
+    })
+    .unwrap();
+    let list = s.execute("graphics.list", json!({"clip": clip.0})).unwrap();
+    assert_eq!(list["layers"][0]["box"], json!([500.0, 0.0]), "as tall as its text");
+    assert_eq!(list["layers"][0]["overflow"], false);
+    s.execute("graphics.set", json!({"clip": clip.0, "props": {"box_height": 100}})).unwrap();
+    assert_eq!(s.execute("graphics.list", json!({"clip": clip.0})).unwrap()["layers"][0]["box"], json!([500.0, 100.0]));
 }

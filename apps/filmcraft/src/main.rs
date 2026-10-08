@@ -164,10 +164,9 @@ fn main() -> eframe::Result {
             {
                 app.set_wgpu(rs);
             }
-            if let Some(out) = audio::CpalOut::new() {
-                // Settings ▸ Audio Hardware is applied on the first frame (`apply_prefs`)
-                app.audio = Some(Box::new(out));
-            }
+            // Keep device selection available even when the default device is unavailable.
+            // Settings ▸ Audio Hardware is applied on the first frame (`apply_prefs`).
+            app.audio = Some(Box::new(audio::CpalOut::new()));
             app.hooks.pick_files = Some(Box::new(|exts: &[&str]| {
                 rfd::FileDialog::new()
                     .add_filter(filmcraft_ui_egui::i18n::t("Media"), exts)
@@ -176,6 +175,10 @@ fn main() -> eframe::Result {
                     .into_iter()
                     .map(|p| p.to_string_lossy().to_string())
                     .collect()
+            }));
+            // Link Media ▸ Locate…, Attach Proxies, Reconnect Full Resolution: one path, not imported.
+            app.hooks.pick_file_for_relink = Some(Box::new(|exts: &[&str], _hint| {
+                rfd::FileDialog::new().add_filter(filmcraft_ui_egui::i18n::t("Media"), exts).pick_file().map(|p| p.to_string_lossy().to_string())
             }));
             app.hooks.pick_save = Some(Box::new(|name: &str| {
                 rfd::FileDialog::new()
@@ -293,6 +296,6 @@ mod tests {
     fn startup_registers_the_hardware_decoders_without_a_logger() {
         assert!(!log::log_enabled!(log::Level::Info));
         let hardware = super::register_hardware_decoders();
-        assert_eq!(filmcraft_platform::registered(), cfg!(target_os = "macos"), "{hardware:?}");
+        assert_eq!(filmcraft_platform::registered(), cfg!(any(target_os = "macos", target_os = "windows")), "{hardware:?}");
     }
 }

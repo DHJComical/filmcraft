@@ -164,6 +164,17 @@ pub(crate) fn u64_p(p: &Value, k: &str) -> Option<u64> {
     p.get(k).and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
 }
 
+/// Typed dimensions/counts must not truncate, wrap or silently accept negative/fractional values.
+/// Integer-valued floats (`1920.0`, as JSON from many clients) are integers.
+pub(crate) fn checked_u32_p(p: &Value, key: &str, cmd: &str) -> Result<Option<u32>> {
+    let Some(value) = p.get(key).filter(|v| !v.is_null()) else { return Ok(None) };
+    let exact = value
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())
+        .or_else(|| value.as_f64().filter(|f| f.is_finite() && f.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(f)).map(|f| f as u32));
+    exact.map(Some).ok_or_else(|| bad(cmd, format!("`{key}` must be an unsigned 32-bit integer")))
+}
+
 /// Parse a time from params: `time` (ticks), `frame`, `seconds` or `timecode`, with `prefix`.
 pub(crate) fn time_p(s: &Session, p: &Value, prefix: &str) -> Option<Tick> {
     let rate = s.sequence_rate();
@@ -445,6 +456,35 @@ fn new_generator(s: &mut Session, g: Generator, name: &str, label: Label, p: &Va
     Ok(json!({"item": id.0}))
 }
 
+/// `project.matteColor`: change a Color Matte's color (`item`, or the one selected in the Project
+/// panel). Every clip of the matte follows; undo brings the old color back.
+fn set_matte_color(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "project.matteColor";
+    let color = str_p(p, "color").and_then(filmcraft_color::parse_hex).ok_or_else(|| bad(CMD, "`color` must be #rrggbb"))?;
+    let is_matte = |s: &Session, id: ItemId| {
+        s.project.item(id).is_some_and(|it| matches!(&it.kind, ItemKind::Media(m) if matches!(m.media, MediaRef::Generator(Generator::ColorMatte { .. }))))
+    };
+    let item = match item_p(p, "item") {
+        Some(id) => id,
+        None => match s.state.project_selection.as_slice() {
+            [id] => *id,
+            _ => return Err(bad(CMD, "select one Color Matte (or pass `item`)")),
+        },
+    };
+    if !is_matte(s, item) {
+        return Err(bad(CMD, format!("item {} is not a Color Matte", item.0)));
+    }
+    s.edit("Color Matte Color", |pr, _| {
+        if let Some(ItemKind::Media(m)) = pr.item_mut(item).map(|it| &mut it.kind)
+            && let MediaRef::Generator(Generator::ColorMatte { color: c }) = &mut m.media
+        {
+            *c = color;
+        }
+        Ok(())
+    })?;
+    Ok(json!({"item": item.0, "color": filmcraft_color::to_hex(color)}))
+}
+
 /// Place a project item on the timeline (drag from Project, or Insert/Overwrite from source).
 pub(crate) fn place_item(
     s: &mut Session,
@@ -632,17 +672,17 @@ fn build() -> Vec<CommandSpec> {
                 if let Some(from) = item_p(p, "fromItem").and_then(|i| s.project.item(i)).and_then(|i| i.as_media()) {
                     st = default_seq_settings_for(&from.info);
                 }
-                if let Some(w) = u64_p(p, "width") {
-                    st.width = w as u32;
+                if let Some(w) = checked_u32_p(p, "width", "file.newSequence")? {
+                    st.width = w;
                 }
-                if let Some(h) = u64_p(p, "height") {
-                    st.height = h as u32;
+                if let Some(h) = checked_u32_p(p, "height", "file.newSequence")? {
+                    st.height = h;
                 }
                 if let Some(fps) = fps_p(p, "file.newSequence")? {
                     st.frame_rate = fps;
                 }
-                if let Some(sr) = u64_p(p, "sampleRate") {
-                    st.sample_rate = sr as u32;
+                if let Some(sr) = checked_u32_p(p, "sampleRate", "file.newSequence")? {
+                    st.sample_rate = sr;
                 }
                 if let Some(m) = str_p(p, "mix") {
                     st.audio_master =
@@ -656,13 +696,17 @@ fn build() -> Vec<CommandSpec> {
                     None => None,
                 };
                 st.preset = format!("{}x{} {}", st.width, st.height, st.frame_rate.label());
-                let nv = u64_p(p, "video").unwrap_or(3) as usize;
-                let na = u64_p(p, "audio").unwrap_or(3) as usize;
+                st.validate().map_err(|e| bad("file.newSequence", e))?;
+                let nv = checked_u32_p(p, "video", "file.newSequence")?.unwrap_or(3);
+                let na = checked_u32_p(p, "audio", "file.newSequence")?.unwrap_or(3);
+                if nv > 256 || na > 256 {
+                    return Err(bad("file.newSequence", "at most 256 video and 256 audio tracks are supported"));
+                }
                 let n = s.project.sequences().count() + 1;
                 let name = str_p(p, "name").map(str::to_string).unwrap_or_else(|| format!("Sequence {n:02}"));
                 let seq_label = s.prefs.labels.defaults.sequence;
                 let id = s.edit("New Sequence", |pr, st2| {
-                    let id = pr.new_sequence(&name, st, nv, na, None);
+                    let id = pr.new_sequence(&name, st, nv as usize, na as usize, None);
                     if let Some(it) = pr.item_mut(id) {
                         it.label = seq_label;
                     }
@@ -723,6 +767,7 @@ fn build() -> Vec<CommandSpec> {
             let c = str_p(p, "color").and_then(filmcraft_color::parse_hex).unwrap_or([0.1, 0.1, 0.1, 1.0]);
             new_generator(s, Generator::ColorMatte { color: c }, "Color Matte", Label::Lavender, p)
         }),
+        cmd!("project.matteColor", "Color Matte Color…", [], None, r##"{"item":id?,"color":"#rrggbb"}"##, always, set_matte_color),
         cmd!("file.newCountingLeader", "Universal Counting Leader…", ["File", "New"], None, "{}", always, |s, p| new_generator(
             s,
             Generator::CountingLeader,
@@ -828,16 +873,17 @@ fn build() -> Vec<CommandSpec> {
             let item_ids: Vec<ItemId> = ids.iter().filter(|i| !image_sequences.iter().any(|q| q["item"].as_u64() == Some(**i))).map(|i| ItemId(*i)).collect();
             // Settings ▸ Media Analysis & Transcription ▸ Automatically transcribe clips
             let ma = &s.prefs.media_analysis;
-            if ma.auto_transcribe
-                && ma.auto_transcribe_scope == "allImported"
-                && !ids.is_empty()
-                && (s.transcriber.is_some() || crate::transcript::speech_available())
-            {
+            if ma.auto_transcribe && ma.auto_transcribe_scope == "allImported" && !ids.is_empty() {
                 let audio: Vec<u64> = ids.iter().copied().filter(|i| s.project.item(ItemId(*i)).is_some_and(|it| it.has_audio())).collect();
-                if !audio.is_empty()
-                    && let Err(e) = s.execute("transcript.generate", json!({"items": audio}))
-                {
-                    errors.push(format!("transcription: {e}"));
+                if !audio.is_empty() {
+                    // without speech-to-text the setting can't act: say so instead of importing
+                    // silently untranscribed (#89)
+                    let r = crate::transcript::can_transcribe(s)
+                        .map_err(EngineError::Other)
+                        .and_then(|()| s.execute("transcript.generate", json!({"items": audio})));
+                    if let Err(e) = r {
+                        errors.push(format!("transcription: {e}"));
+                    }
                 }
             }
             let ingest = match crate::proxies::ingest(s, &item_ids) {
@@ -856,6 +902,14 @@ fn build() -> Vec<CommandSpec> {
             };
             if !image_sequences.is_empty() {
                 out["imageSequences"] = json!(image_sequences);
+            }
+            // Newly imported files may resolve paths the project already listed as offline
+            // (issue #110): rebuild s.offline.missing so the "Media missing" badge clears, and drop
+            // the cached slate of every item that came back so the monitors show the file again.
+            let was_missing = s.offline.missing.clone();
+            crate::relink::refresh(s);
+            for item in was_missing.iter().filter(|i| !s.offline.missing.contains(i)) {
+                s.media.remove(*item);
             }
             Ok(out)
         }),
@@ -1017,7 +1071,7 @@ fn build() -> Vec<CommandSpec> {
             "Media…",
             ["File", "Export"],
             None,
-            r#"{"path":str,"preset":str?,"settings":ExportSettings?,"format":"h264|prores|dnxhr|apv|mjpeg|mxf-op1a|mxf-opatom|png|tiff|bmp|gif|wav|aiff"?,"width":u32?,"height":u32?,"fps":f64?,"bitrateKbps":u32?,"bitrateMode":"cbr|vbr1Pass|vbr2Pass"?,"scale":f32=1,"audio":bool=true,"quality":0..100,"burnCaptions":bool=false,"captionSidecar":"srt|vtt"?,"loudnessLufs":f64?,"proresProfile":"proxy|lt|standard|hq"?,"dnxProfile":"lb|sq|hq|hqx"?,"apvProfile":"422-10|422-12|444-10|444-12"?,"mxfVideoCodec":"dnxhr|proRes|h264"?,"sequence":id?,"range":"entire|inOut|workArea|custom"?,"startSeconds":f64?,"endSeconds":f64?,"wait":bool=false}"#,
+            r#"{"path":str,"preset":str?,"settings":ExportSettings?,"format":"h264|hevc|prores|dnxhr|apv|mjpeg|mxf-op1a|mxf-opatom|png|tiff|bmp|gif|wav|aiff"?,"width":u32?,"height":u32?,"fps":f64?,"bitrateKbps":u32?,"bitrateMode":"cbr|vbr1Pass|vbr2Pass"?,"hardwareEncoding":"off|auto"?,"scale":f32=1,"audio":bool=true,"quality":0..100,"burnCaptions":bool=false,"captionSidecar":"srt|vtt"?,"loudnessLufs":f64?,"proresProfile":"proxy|lt|standard|hq"?,"dnxProfile":"lb|sq|hq|hqx"?,"apvProfile":"422-10|422-12|444-10|444-12"?,"mxfVideoCodec":"dnxhr|proRes|h264"?,"sequence":id?,"range":"entire|inOut|workArea|custom"?,"startSeconds":f64?,"endSeconds":f64?,"wait":bool=false}"#,
             has_seq,
             crate::export_tools::export_media
         ),
@@ -1332,8 +1386,17 @@ fn build() -> Vec<CommandSpec> {
         }),
         cmd!("sequence.addEdit", "Add Edit", ["Sequence"], Some("Cmd+K"), r#"{"time":ticks?}"#, has_seq, |s, p| {
             let t = time_p(s, p, "").unwrap_or(s.playhead());
-            let tg = s.targeting().targeted;
-            let n = s.edit_sequence("Add Edit", |q, ctx, _| Ok(edit::razor(q, &tg, t, ctx)))?;
+            // Like Premiere: selected clips under the playhead are cut, and only they (#164);
+            // with none, the targeted tracks are.
+            let sel = s.state.selection.clone();
+            let selected_here =
+                s.active_sequence().is_some_and(|q| sel.iter().any(|c| q.find_item(*c).is_some_and(|(_, it)| it.start < t && t < it.start + it.duration)));
+            let n = if selected_here {
+                s.edit_sequence("Add Edit", |q, ctx, _| Ok(edit::razor_items(q, &sel, t, ctx)))?
+            } else {
+                let tg = s.targeting().targeted;
+                s.edit_sequence("Add Edit", |q, ctx, _| Ok(edit::razor(q, &tg, t, ctx)))?
+            };
             Ok(json!({"cuts": n.len()}))
         }),
         cmd!("sequence.addEditAllTracks", "Add Edit to All Tracks", ["Sequence"], Some("Cmd+Shift+K"), r#"{"time":ticks?}"#, has_seq, |s, p| {
@@ -1467,22 +1530,22 @@ fn build() -> Vec<CommandSpec> {
                         pr.item_mut(id).ok_or(EngineError::NoSequence)?.name = n.to_string();
                     }
                     let q = pr.sequence_mut(id).ok_or(EngineError::NoSequence)?;
-                    if let Some(w) = u64_p(&p, "width") {
-                        q.settings.width = w as u32;
+                    if let Some(w) = checked_u32_p(&p, "width", "sequence.settings")? {
+                        q.settings.width = w;
                     }
-                    if let Some(h) = u64_p(&p, "height") {
-                        q.settings.height = h as u32;
+                    if let Some(h) = checked_u32_p(&p, "height", "sequence.settings")? {
+                        q.settings.height = h;
                     }
                     if let Some(f) = fps {
                         q.settings.frame_rate = f;
                     }
-                    if let Some(sr) = u64_p(&p, "sampleRate") {
-                        q.settings.sample_rate = sr as u32;
+                    if let Some(sr) = checked_u32_p(&p, "sampleRate", "sequence.settings")? {
+                        q.settings.sample_rate = sr;
                     }
                     if let Some(m) = mix {
                         q.settings.audio_master = m;
                     }
-                    Ok(())
+                    q.settings.validate().map_err(|e| bad("sequence.settings", e))
                 })?;
                 Ok(Value::Null)
             }
@@ -2161,7 +2224,7 @@ fn build() -> Vec<CommandSpec> {
             "Set Effect Parameter",
             [],
             None,
-            r##"{"clip":id,"effect":"motion"|index,"param":str,"mask":n?,"value":num|[x,y]|"#rrggbb"|bool|path,"time":ticks?}"##,
+            r##"{"clip":id,"effect":"motion"|index,"param":str,"mask":n?,"value":num|[x,y]|"#rrggbb"|bool|path,"time":ticks?,"merge":bool?,"begin":bool?}"##,
             has_seq,
             |s, p| {
                 let c = clip_p(p, "clip").ok_or_else(|| bad("effects.setParam", "need `clip`"))?;
@@ -2171,9 +2234,14 @@ fn build() -> Vec<CommandSpec> {
                 let ph = s.playhead();
                 let tl = time_p(s, p, "").unwrap_or(ph);
                 let pq = p.clone();
-                s.edit_sequence("Change Effect Parameter", |q, _, _| {
+                // `merge`: a drag of one parameter is one undo step (#201); `begin` starts a new one
+                let merge = bool_p(p, "merge").unwrap_or(false).then(|| format!("setParam:{}:{eff}:{pid}:{}", c.0, p.get("mask").unwrap_or(&Value::Null)));
+                if bool_p(p, "begin").unwrap_or(false) {
+                    s.history.merge_key = None;
+                }
+                s.edit_sequence_as("Change Effect Parameter", merge.as_deref(), |q, _, _| {
                     let (_, it) = q.find_item_mut(c).ok_or(filmcraft_edit::EditError::NoItem(c))?;
-                    let mt = it.source_time_at(tl.clamp(it.start, it.end() - Tick(1)));
+                    let mt = it.source_time_at(tl.clamp(it.start, (it.end() - Tick(1)).max(it.start)));
                     let e = match &eff {
                         Value::Number(n) => it.effects.get_mut(n.as_u64().unwrap_or(0) as usize),
                         Value::String(sid) => it.effects.iter_mut().find(|e| &e.effect == sid),
@@ -2204,7 +2272,7 @@ fn build() -> Vec<CommandSpec> {
             let ph = s.playhead();
             s.edit_sequence("Toggle Animation", |q, _, _| {
                 let (_, it) = q.find_item_mut(c).ok_or(filmcraft_edit::EditError::NoItem(c))?;
-                let mt = it.source_time_at(ph.clamp(it.start, it.end() - Tick(1)));
+                let mt = it.source_time_at(ph.clamp(it.start, (it.end() - Tick(1)).max(it.start)));
                 let e = match &eff {
                     Value::Number(n) => it.effects.get_mut(n.as_u64().unwrap_or(0) as usize),
                     Value::String(sid) => it.effects.iter_mut().find(|e| &e.effect == sid),
@@ -2471,7 +2539,7 @@ fn keyframe_op(s: &mut Session, p: &Value, op: &str) -> Result<Value> {
     };
     s.edit_sequence(label, |q, _, _| {
         let (_, it) = q.find_item_mut(c).ok_or(filmcraft_edit::EditError::NoItem(c))?;
-        let mt_now = it.source_time_at(ph.clamp(it.start, it.end() - Tick(1)));
+        let mt_now = it.source_time_at(ph.clamp(it.start, (it.end() - Tick(1)).max(it.start)));
         let e = match &eff {
             Value::Number(n) => it.effects.get_mut(n.as_u64().unwrap_or(0) as usize),
             Value::String(sid) => it.effects.iter_mut().find(|e| &e.effect == sid),

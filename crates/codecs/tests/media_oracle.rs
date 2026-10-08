@@ -13,19 +13,33 @@ use filmcraft_media::sequence::{FrameLoader, ImageSequenceSource, Numbered, sequ
 use filmcraft_media::{FrameRequest, MediaKind, MediaSource};
 use filmcraft_time::FrameRate;
 
+/// Twelve numbered stills written by ffmpeg, shared by every test that uses `ext` (#125).
+///
+/// ffmpeg writes into a private temporary directory, which is renamed into place only when all
+/// twelve frames are there, so a test never reads a sequence another test is still writing (a
+/// half-written PNG decodes as missing, and the sequence then holds the previous frame). A test that
+/// loses the race keeps the winner's copy. The `.complete` marker tells a finished cache from a
+/// directory left by an older, non-atomic generator (hence the `_v2` name).
 fn make_sequence(ff: &Path, ext: &str, codec_args: &[&str]) -> Option<std::path::PathBuf> {
-    let d = dir().join(format!("seq_{ext}"));
-    let first = d.join(format!("img_0001.{ext}"));
-    if first.exists() && d.join(format!("img_0012.{ext}")).exists() {
+    let d = dir().join(format!("seq_{ext}_v2"));
+    let complete = |d: &Path| d.join(".complete").exists();
+    if complete(&d) {
         return Some(d);
     }
-    let _ = std::fs::create_dir_all(&d);
-    let pattern = d.join(format!("img_%04d.{ext}"));
+    let tmp = filmcraft_testkit::fixtures::temp_path(&d);
+    std::fs::create_dir_all(&tmp).ok()?;
+    let pattern = tmp.join(format!("img_%04d.{ext}"));
     let mut args = vec!["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=96x64:rate=25", "-frames:v", "12"];
     args.extend_from_slice(codec_args);
     args.extend_from_slice(&["-f", "image2"]);
-    let st = std::process::Command::new(ff).args(&args).arg(&pattern).status().ok()?;
-    st.success().then_some(d)
+    let made = std::process::Command::new(ff).args(&args).arg(&pattern).status().is_ok_and(|st| st.success())
+        && (1..=12).all(|n| tmp.join(format!("img_{n:04}.{ext}")).exists())
+        && std::fs::write(tmp.join(".complete"), b"").is_ok();
+    if made && std::fs::rename(&tmp, &d).is_ok() {
+        return Some(d);
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    complete(&d).then_some(d)
 }
 
 fn loader() -> FrameLoader {
@@ -104,9 +118,9 @@ fn webp_sequence_lossless() {
 fn missing_frames_hold_the_previous_frame() {
     let ff = filmcraft_testkit::require_ffmpeg!();
     let Some(d) = make_sequence(&ff, "png", &[]) else { return };
-    // a copy without frames 5 and 6
-    let gap = dir().join("seq_png_gap");
-    let _ = std::fs::create_dir_all(&gap);
+    // a private copy without frames 5 and 6
+    let gap = filmcraft_testkit::fixtures::temp_path(&dir().join("seq_png_gap"));
+    std::fs::create_dir_all(&gap).unwrap();
     for n in (1..=12).filter(|n| *n != 5 && *n != 6) {
         let name = format!("img_{n:04}.png");
         std::fs::copy(d.join(&name), gap.join(&name)).unwrap();
@@ -119,6 +133,7 @@ fn missing_frames_hold_the_previous_frame() {
     assert_eq!(at(4), at(3));
     assert_eq!(at(5), at(3));
     assert_ne!(at(6), at(3));
+    let _ = std::fs::remove_dir_all(&gap);
 }
 
 #[test]
