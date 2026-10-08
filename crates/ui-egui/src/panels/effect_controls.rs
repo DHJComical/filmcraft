@@ -12,6 +12,21 @@ use crate::icons::{self, Icon};
 use crate::theme::Tokens;
 
 const ROW_H: f32 = 22.0;
+/// Keyframe lane header: the time ruler (beside the Source / Sequence pills) and the clip's bar.
+const RULER_H: f32 = 24.0;
+const CLIP_BAR_H: f32 = 18.0;
+/// Distance between the keyframe navigator's buttons (◀ ◆ ▶).
+const NAV_STEP: f32 = 16.0;
+/// Properties panel: the keyframe diamonds' column, from a row's right edge (the arrows sit one
+/// [`NAV_STEP`] to either side of it, and a section's reset button above it).
+const PROPS_NAV_X: f32 = 26.0;
+/// Properties panel: where a row's value fields end, left of the navigator.
+const PROPS_VALUE_R: f32 = PROPS_NAV_X + NAV_STEP + 12.0;
+
+/// Timeline time at which the clip shows media time `m` (where a keyframe sits in the sequence).
+fn timeline_time_of(it: &TrackItem, m: Tick) -> Tick {
+    it.start + Tick(((m - it.source_in).0 as f64 / it.speed.abs().max(1e-6)) as i64)
+}
 
 fn selected_clip(app: &FilmcraftApp) -> Option<(ClipId, TrackItem, filmcraft_project::TrackKind)> {
     let seq = app.session.active_sequence()?;
@@ -52,22 +67,29 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let half = (head.width() - 6.0) / 2.0;
     pill(ui, Rect::from_min_size(head.min, vec2(half, 24.0)), &format!("Source · {}", it.name), false);
     pill(ui, Rect::from_min_size(head.min + vec2(half + 6.0, 0.0), vec2(half, 24.0)), &format!("{} · {}", seq_name(app), it.name), true);
-    // keyframe lane header: mini ruler over the clip's duration
+    // keyframe lane header, as Premiere's: a time ruler over the clip's stretch of the sequence,
+    // which the playhead's handle rides on, and the clip's bar under it
     let lane = Rect::from_min_max(pos2(split + 4.0, rect.min.y + 4.0), pos2(rect.max.x - 6.0, rect.max.y - 26.0));
     ui.painter().rect_filled(lane, 0.0, t.tl_bg);
     let ph = app.session.playhead();
     let dur = it.duration.0.max(1) as f64;
     let lx = |tk: Tick| -> f32 { lane.min.x + (((tk - it.start).0 as f64 / dur) as f32).clamp(0.0, 1.0) * lane.width() };
-    ui.painter().rect_filled(Rect::from_min_max(pos2(lane.min.x, lane.min.y + 2.0), pos2(lane.max.x, lane.min.y + 16.0)), 2.0, Color32::from_rgb(58, 58, 70));
-    ui.painter().text(pos2(lane.min.x + 4.0, lane.min.y + 9.0), Align2::LEFT_CENTER, &it.name, Tokens::ui(10.0), t.text);
-    let scrub = Rect::from_min_max(lane.min, pos2(lane.max.x, lane.min.y + 18.0));
+    let rate = seq.settings.frame_rate;
+    let ruler = Rect::from_min_max(lane.min, pos2(lane.max.x, lane.min.y + RULER_H));
+    paint_ruler(ui.painter(), ruler, &it, rate, seq.settings.drop_frame, &t);
+    let bar = Rect::from_min_max(pos2(lane.min.x, ruler.max.y + 4.0), pos2(lane.max.x, ruler.max.y + 4.0 + CLIP_BAR_H));
+    ui.painter().rect_filled(bar.shrink2(vec2(0.0, 2.0)), 2.0, Color32::from_rgb(58, 58, 70));
+    ui.painter().with_clip_rect(bar).text(pos2(bar.min.x + 4.0, bar.center().y), Align2::LEFT_CENTER, &it.name, Tokens::ui(10.0), t.text);
+    // click or drag anywhere on the ruler (or the bar) to move the playhead
+    let scrub = Rect::from_min_max(ruler.min, bar.max);
     let sresp = ui.interact(scrub, egui::Id::new(("ec-scrub", clip.0)), Sense::click_and_drag());
     app.auto.add("effectControls.lane", lane, "keyframe lane");
+    app.auto.add("effectControls.ruler", scrub, "time ruler");
     if (sresp.dragged() || sresp.clicked())
         && let Some(pos) = sresp.interact_pointer_pos()
     {
         let f = ((pos.x - lane.min.x) / lane.width()).clamp(0.0, 1.0) as f64;
-        let tk = it.start + Tick((f * it.duration.0 as f64) as i64);
+        let tk = rate.snap_nearest(it.start + Tick((f * it.duration.0 as f64) as i64));
         app.stop();
         app.session.set_playhead(tk);
     }
@@ -163,9 +185,15 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
     });
     let _ = scroll_out;
-    // playhead in lane
-    let px = lx(ph);
-    ui.painter().line_segment([pos2(px, lane.min.y), pos2(px, lane.max.y)], Stroke::new(1.0, t.playhead));
+    // playhead: a handle on the ruler and a line down the lane, while it is on the clip
+    if ph >= it.start && ph <= it.end() {
+        let px = lx(ph);
+        let (top, tip) = (ruler.max.y - 13.0, ruler.max.y);
+        let head = vec![pos2(px - 5.0, top), pos2(px + 5.0, top), pos2(px + 5.0, tip - 5.0), pos2(px, tip), pos2(px - 5.0, tip - 5.0)];
+        ui.painter().add(egui::Shape::convex_polygon(head, t.playhead, Stroke::NONE));
+        ui.painter().line_segment([pos2(px, tip), pos2(px, lane.max.y)], Stroke::new(1.0, t.playhead));
+        app.auto.add("effectControls.playhead", Rect::from_min_max(pos2(px - 5.0, top), pos2(px + 5.0, tip)), "playhead");
+    }
     // footer timecode
     let tc = filmcraft_time::format_time(ph, seq.settings.frame_rate, seq.settings.drop_frame, filmcraft_time::TimeDisplay::Timecode, 48000);
     ui.painter().text(pos2(rect.min.x + 10.0, rect.max.y - 13.0), Align2::LEFT_CENTER, tc, Tokens::mono(13.0), t.timecode);
@@ -190,6 +218,137 @@ fn custom_setup_row(app: &mut FilmcraftApp, ui: &mut egui::Ui, body: Rect, clip:
 
 fn seq_name(app: &FilmcraftApp) -> String {
     app.session.state.active_sequence.and_then(|s| app.session.project.item(s)).map(|i| i.name.clone()).unwrap_or_default()
+}
+
+/// The keyframe lane's time ruler: ticks and sequence timecode across the clip's stretch of the
+/// timeline (the lane shows exactly the clip, so the ruler starts at the clip's start).
+fn paint_ruler(p: &egui::Painter, ruler: Rect, it: &TrackItem, rate: filmcraft_time::FrameRate, drop_frame: bool, t: &Tokens) {
+    let p = p.with_clip_rect(ruler);
+    let dur = it.duration.0.max(1) as f64;
+    let frame_px = ruler.width() as f64 * rate.frame_duration().0.max(1) as f64 / dur;
+    let base = rate.timecode_base();
+    let steps = [
+        1,
+        2,
+        5,
+        10,
+        base / 2,
+        base,
+        base * 2,
+        base * 5,
+        base * 10,
+        base * 15,
+        base * 30,
+        base * 60,
+        base * 120,
+        base * 300,
+        base * 600,
+        base * 1800,
+        base * 3600,
+    ];
+    // labels far enough apart to read; the small ticks divide the labelled ones evenly
+    let label_step = steps.iter().copied().find(|s| *s > 0 && *s as f64 * frame_px >= 80.0);
+    let minor = steps.iter().copied().find(|s| *s > 0 && *s as f64 * frame_px >= 8.0 && label_step.is_none_or(|l| l % s == 0));
+    let (f0, f1) = (rate.frame_at(it.start), rate.frame_at(it.end()));
+    let base_y = ruler.max.y - 1.0;
+    for (step, h, labelled) in [(minor, 3.0, false), (label_step, 7.0, true)] {
+        let Some(step) = step else { continue };
+        let mut f = f0.div_euclid(step).saturating_mul(step);
+        // a step is at least 8 px wide, so this covers any ruler; the cap is for damaged numbers
+        for _ in 0..4096 {
+            if f > f1 {
+                break;
+            }
+            let x = ruler.min.x + ((rate.tick_of(f) - it.start).0 as f64 / dur) as f32 * ruler.width();
+            p.line_segment([pos2(x, base_y - h), pos2(x, base_y)], Stroke::new(1.0, t.tl_ruler_tick));
+            if labelled {
+                let label = filmcraft_time::format_time(rate.tick_of(f), rate, drop_frame, filmcraft_time::TimeDisplay::Timecode, 48000);
+                p.text(pos2(x, ruler.min.y + 7.0), Align2::CENTER_CENTER, label, Tokens::ui(10.0), t.tl_ruler_text);
+            }
+            f = f.saturating_add(step);
+        }
+    }
+}
+
+/// Premiere's keyframe navigator, centred on `at`: a diamond that adds a keyframe at the playhead
+/// or removes the one there (filled while the playhead is on a keyframe) and, once the parameter
+/// is animated, arrows to the previous and the next keyframe. `param` is `None` while the effect
+/// is not on the clip yet. Automation ids: `<auto>.addKeyframe`, `.prevKeyframe`, `.nextKeyframe`.
+/// Returns whether the diamond was clicked; the arrows queue their own `playhead.set`.
+#[allow(clippy::too_many_arguments)]
+fn keyframe_nav(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    at: Pos2,
+    param: Option<&filmcraft_project::Param>,
+    mt: Tick,
+    it: &TrackItem,
+    id: egui::Id,
+    auto: &str,
+    tip: &str,
+    actions: &mut Vec<(String, Value)>,
+) -> bool {
+    let t = app.tokens;
+    if let Some(param) = param.filter(|p| p.is_animated()) {
+        for (d, target, name, tip) in
+            [(-1.0, param.prev_keyframe(mt), "prevKeyframe", "Go to previous keyframe"), (1.0, param.next_keyframe(mt), "nextKeyframe", "Go to next keyframe")]
+        {
+            let r = Rect::from_center_size(at + vec2(d * NAV_STEP, 0.0), vec2(12.0, 14.0));
+            let resp = ui.interact(r, id.with(name), Sense::click()).on_hover_text(tip);
+            let c = r.center();
+            let pts = vec![c + vec2(-3.0 * d, -4.0), c + vec2(-3.0 * d, 4.0), c + vec2(3.0 * d, 0.0)];
+            ui.painter().add(egui::Shape::convex_polygon(pts, if target.is_some() { t.text } else { t.text_faint }, Stroke::NONE));
+            app.auto.add(&format!("{auto}.{name}"), r, tip);
+            if resp.clicked()
+                && let Some(k) = target
+            {
+                actions.push(("playhead.set".into(), json!({"time": timeline_time_of(it, k).0})));
+            }
+        }
+    }
+    let r = Rect::from_center_size(at, vec2(13.0, 13.0));
+    let resp = ui.interact(r.expand(1.5), id.with("key"), Sense::click()).on_hover_text(tip);
+    if param.is_some_and(|p| p.keyframes.iter().any(|k| k.time == mt)) {
+        icons::paint(ui.painter(), r, Icon::Keyframe, t.hot_text);
+    } else {
+        let s = 4.0;
+        let outline = vec![at + vec2(0.0, -s), at + vec2(s, 0.0), at + vec2(0.0, s), at + vec2(-s, 0.0)];
+        ui.painter().add(egui::Shape::closed_line(outline, Stroke::new(1.2, if resp.hovered() { t.text } else { t.text_dim })));
+    }
+    app.auto.add(&format!("{auto}.addKeyframe"), r, tip);
+    resp.clicked()
+}
+
+/// A Properties row's keyframe navigator for `effect`.`param`, with Premiere's tooltips. The
+/// diamond is `effects.addKeyframe`: it adds a keyframe at the playhead (turning animation on) or
+/// removes the one there, so the value falls back to what the remaining keyframes give. An effect
+/// the clip does not have yet (Crop) is applied first.
+#[allow(clippy::too_many_arguments)]
+fn properties_nav(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    row: Rect,
+    clip: ClipId,
+    it: &TrackItem,
+    mt: Tick,
+    effect: &str,
+    param: &str,
+    actions: &mut Vec<(String, Value)>,
+) {
+    let prm = it.effect(effect).and_then(|e| e.param(param));
+    let tip = match prm {
+        Some(p) if p.keyframes.iter().any(|k| k.time == mt) => "Remove keyframe",
+        Some(p) if p.is_animated() => "Add keyframe",
+        _ => "Turn on animation and add keyframe",
+    };
+    let at = pos2(row.max.x - PROPS_NAV_X, row.center().y);
+    let id = egui::Id::new(("props-nav", effect, param, clip.0));
+    if keyframe_nav(app, ui, at, prm, mt, it, id, &format!("properties.{effect}.{param}"), tip, actions) {
+        if it.effect(effect).is_none() {
+            actions.push(("effects.apply".into(), json!({"clips": [clip.0], "effect": effect})));
+        }
+        actions.push(("effects.addKeyframe".into(), json!({"clip": clip.0, "effect": effect, "param": param})));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -337,41 +496,11 @@ pub(crate) fn param_row(
     // keyframe navigator ◀ ◆ ▶ (when animated)
     let eff_json = json!(idx);
     if pd.animatable && param.is_animated() {
-        let nx = r.max.x - 58.0;
-        let cy = r.center().y;
-        let at_key = param.keyframes.iter().any(|k| k.time == mt);
-        let prev = param.prev_keyframe(mt);
-        let next = param.next_keyframe(mt);
-        let to_tl = |k: Tick| it.start + Tick(((k - it.source_in).0 as f64 / it.speed.abs().max(1e-6)) as i64);
-        let pr = Rect::from_center_size(pos2(nx, cy), vec2(12.0, 14.0));
-        let kr = Rect::from_center_size(pos2(nx + 16.0, cy), vec2(12.0, 12.0));
-        let nr = Rect::from_center_size(pos2(nx + 32.0, cy), vec2(12.0, 14.0));
-        let arrow = |p: &egui::Painter, r: Rect, left: bool, on: bool| {
-            let c = r.center();
-            let pts = if left {
-                vec![c + vec2(3.0, -4.0), c + vec2(3.0, 4.0), c + vec2(-3.0, 0.0)]
-            } else {
-                vec![c + vec2(-3.0, -4.0), c + vec2(-3.0, 4.0), c + vec2(3.0, 0.0)]
-            };
-            p.add(egui::Shape::convex_polygon(pts, if on { t.text } else { t.text_faint }, Stroke::NONE));
-        };
-        arrow(ui.painter(), pr, true, prev.is_some());
-        arrow(ui.painter(), nr, false, next.is_some());
-        icons::paint(ui.painter(), kr, Icon::Keyframe, if at_key { t.hot_text } else { t.text_dim });
-        if ui.interact(pr, egui::Id::new(("kprev", clip.0, idx, pkey)), Sense::click()).clicked()
-            && let Some(k) = prev
-        {
-            actions.push(("playhead.set".into(), json!({"time": to_tl(k).0})));
-        }
-        if ui.interact(nr, egui::Id::new(("knext", clip.0, idx, pkey)), Sense::click()).clicked()
-            && let Some(k) = next
-        {
-            actions.push(("playhead.set".into(), json!({"time": to_tl(k).0})));
-        }
-        if ui.interact(kr, egui::Id::new(("kadd", clip.0, idx, pkey)), Sense::click()).on_hover_text("Add/Remove Keyframe").clicked() {
+        let at = pos2(r.max.x - 42.0, r.center().y);
+        let auto = format!("effectControls.{}.{}", e.effect, pkey);
+        if keyframe_nav(app, ui, at, Some(param), mt, it, egui::Id::new(("knav", clip.0, idx, pkey)), &auto, "Add/Remove Keyframe", actions) {
             actions.push(("effects.addKeyframe".into(), with_mask(json!({"clip": clip.0, "effect": eff_json, "param": pd.id}))));
         }
-        app.auto.add(&format!("effectControls.{}.{}.addKeyframe", e.effect, pkey), kr, "Add/Remove Keyframe");
     }
     // keyframes in the lane: draggable diamonds; right-click for interpolation
     if param.is_animated() {
@@ -563,7 +692,7 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         );
         ui.painter().text(pos2(r.min.x + 18.0, r.center().y), Align2::LEFT_CENTER, name, Tokens::semibold(13.0), t.text);
         if let Some((idx, c)) = reset {
-            let rr = Rect::from_center_size(pos2(r.max.x - 10.0, r.center().y), vec2(14.0, 14.0));
+            let rr = Rect::from_center_size(pos2(r.max.x - PROPS_NAV_X, r.center().y), vec2(14.0, 14.0));
             icons::paint(ui.painter(), rr, Icon::Reset, t.text_dim);
             if ui.interact(rr, egui::Id::new(("props-reset", name, c)), Sense::click()).clicked() {
                 actions.push(("effects.reset".into(), json!({"clip": c, "index": idx})));
@@ -578,22 +707,8 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         open
     };
-    let diamond = |ui: &mut egui::Ui, r: Rect, animated: bool, id: egui::Id| -> bool {
-        let dr = Rect::from_center_size(pos2(r.max.x - 10.0, r.center().y), vec2(10.0, 10.0));
-        let resp = ui.interact(dr.expand(3.0), id, Sense::click());
-        if animated {
-            icons::paint(ui.painter(), dr, Icon::Keyframe, t.hot_text);
-        } else {
-            let c = dr.center();
-            let s = 4.5;
-            ui.painter()
-                .add(egui::Shape::closed_line(vec![c + vec2(0.0, -s), c + vec2(s, 0.0), c + vec2(0.0, s), c + vec2(-s, 0.0)], Stroke::new(1.2, t.text_dim)));
-        }
-        resp.clicked()
-    };
     let eff_idx = |id: &str| it.effects.iter().position(|e| e.effect == id);
     let val = |eid: &str, p: &str| it.effect(eid).and_then(|e| e.param(p)).map(|p| p.value_at(mt));
-    let anim = |eid: &str, p: &str| it.effect(eid).and_then(|e| e.param(p)).is_some_and(|p| p.is_animated());
     if kind == filmcraft_project::TrackKind::Video {
         if section(&mut bui, app, "Transform", eff_idx("motion").map(|i| (i, clip.0)), &mut actions) {
             for (label, p, unit, speed, range) in [
@@ -605,7 +720,7 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 let r = row(&mut bui, label);
                 let mut vui = bui.new_child(
                     egui::UiBuilder::new()
-                        .max_rect(Rect::from_min_max(pos2(r.min.x + 150.0, r.min.y + 4.0), pos2(r.max.x - 24.0, r.max.y - 4.0)))
+                        .max_rect(Rect::from_min_max(pos2(r.min.x + 150.0, r.min.y + 4.0), pos2(r.max.x - PROPS_VALUE_R, r.max.y - 4.0)))
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
                 match val("motion", p) {
@@ -629,14 +744,12 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     }
                     _ => {}
                 }
-                if diamond(&mut bui, r, anim("motion", p), egui::Id::new(("pd", p, clip.0))) {
-                    actions.push(("effects.toggleAnimation".into(), json!({"clip": clip.0, "effect": "motion", "param": p})));
-                }
+                properties_nav(app, &mut bui, r, clip, &it, mt, "motion", p, &mut actions);
             }
             let r = row(&mut bui, "Opacity");
             let mut vui = bui.new_child(
                 egui::UiBuilder::new()
-                    .max_rect(Rect::from_min_max(pos2(r.min.x + 150.0, r.min.y + 4.0), pos2(r.max.x - 24.0, r.max.y - 4.0)))
+                    .max_rect(Rect::from_min_max(pos2(r.min.x + 150.0, r.min.y + 4.0), pos2(r.max.x - PROPS_VALUE_R, r.max.y - 4.0)))
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
             if let Some(ParamValue::Float(v)) = val("opacity", "opacity") {
@@ -645,9 +758,7 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     actions.push(("effects.setParam".into(), json!({"clip": clip.0, "effect": "opacity", "param": "opacity", "value": nv})));
                 }
             }
-            if diamond(&mut bui, r, anim("opacity", "opacity"), egui::Id::new(("pd-op", clip.0))) {
-                actions.push(("effects.toggleAnimation".into(), json!({"clip": clip.0, "effect": "opacity", "param": "opacity"})));
-            }
+            properties_nav(app, &mut bui, r, clip, &it, mt, "opacity", "opacity", &mut actions);
         }
         let crop = eff_idx("crop");
         if section(&mut bui, app, "Crop", crop.map(|i| (i, clip.0)), &mut actions) {
@@ -655,7 +766,7 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 let r = row(&mut bui, label);
                 let mut vui = bui.new_child(
                     egui::UiBuilder::new()
-                        .max_rect(Rect::from_min_max(pos2(r.min.x + 150.0, r.min.y + 4.0), pos2(r.max.x - 24.0, r.max.y - 4.0)))
+                        .max_rect(Rect::from_min_max(pos2(r.min.x + 150.0, r.min.y + 4.0), pos2(r.max.x - PROPS_VALUE_R, r.max.y - 4.0)))
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
                 let v = val("crop", p).and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -666,14 +777,14 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     }
                     actions.push(("effects.setParam".into(), json!({"clip": clip.0, "effect": "crop", "param": p, "value": nv})));
                 }
-                diamond(&mut bui, r, anim("crop", p), egui::Id::new(("pd-crop", p, clip.0)));
+                properties_nav(app, &mut bui, r, clip, &it, mt, "crop", p, &mut actions);
             }
         }
     } else if section(&mut bui, app, "Audio", eff_idx("volume").map(|i| (i, clip.0)), &mut actions) {
         let r = row(&mut bui, "Level");
         let mut vui = bui.new_child(
             egui::UiBuilder::new()
-                .max_rect(Rect::from_min_max(pos2(r.min.x + 150.0, r.min.y + 4.0), pos2(r.max.x - 24.0, r.max.y - 4.0)))
+                .max_rect(Rect::from_min_max(pos2(r.min.x + 150.0, r.min.y + 4.0), pos2(r.max.x - PROPS_VALUE_R, r.max.y - 4.0)))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
         let v = val("volume", "level").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -681,13 +792,11 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if let Some(nv) = nv {
             actions.push(("effects.setParam".into(), json!({"clip": clip.0, "effect": "volume", "param": "level", "value": nv})));
         }
-        if diamond(&mut bui, r, anim("volume", "level"), egui::Id::new(("pd-vol", clip.0))) {
-            actions.push(("effects.toggleAnimation".into(), json!({"clip": clip.0, "effect": "volume", "param": "level"})));
-        }
+        properties_nav(app, &mut bui, r, clip, &it, mt, "volume", "level", &mut actions);
         let r = row(&mut bui, "Pan");
         let mut vui = bui.new_child(
             egui::UiBuilder::new()
-                .max_rect(Rect::from_min_max(pos2(r.min.x + 150.0, r.min.y + 4.0), pos2(r.max.x - 24.0, r.max.y - 4.0)))
+                .max_rect(Rect::from_min_max(pos2(r.min.x + 150.0, r.min.y + 4.0), pos2(r.max.x - PROPS_VALUE_R, r.max.y - 4.0)))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
         let v = val("panner", "balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -936,5 +1045,99 @@ mod drag_undo_tests {
         assert_eq!(opacity(&app), 70.0, "undo takes back only the second drag");
         app.session.undo();
         assert_eq!(opacity(&app), start, "and then the first");
+    }
+}
+
+#[cfg(test)]
+mod lane_tests {
+    use super::*;
+
+    /// A context with the app's fonts (the panels use the semibold family).
+    fn context() -> egui::Context {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &Tokens::for_kind(Default::default()));
+        ctx
+    }
+
+    /// A project file is only checked for overflow, so a damaged one can carry a clip with no
+    /// (or a negative) duration. Selecting it must still draw both panels, ruler, playhead and
+    /// keyframe navigators included.
+    #[test]
+    fn a_clip_without_a_duration_still_draws() {
+        let mut s = filmcraft_engine::Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        let clip = s.active_sequence().unwrap().video_tracks[0].items[0].id;
+        s.execute("timeline.select", json!({"clips": [clip.0]})).unwrap();
+        s.execute("effects.toggleAnimation", json!({"clip": clip.0, "effect": "motion", "param": "scale"})).unwrap();
+        let seq = s.state.active_sequence.unwrap();
+        let mut app = crate::FilmcraftApp::new(s);
+        let ctx = context();
+        for duration in [0, -5 * filmcraft_time::TICKS_PER_SECOND] {
+            let project = std::sync::Arc::make_mut(&mut app.session.project);
+            project.sequence_mut(seq).unwrap().find_item_mut(clip).unwrap().1.duration = Tick(duration);
+            let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(700.0, 500.0));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                show(&mut app, ui, rect);
+                properties_panel(&mut app, ui, rect);
+            });
+            out.textures_delta.clear();
+        }
+    }
+
+    /// The ruler takes its numbers from the project (clip times, the sequence's frame rate) and
+    /// the panel's size. Anything a project that opens can carry (times within `Tick::MIN..=MAX`,
+    /// a rate within `SequenceSettings::validate`, or an unset one) must not make it panic or
+    /// tick forever.
+    #[test]
+    fn ruler_survives_damaged_numbers() {
+        let mut s = filmcraft_engine::Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        let mut it = s.active_sequence().unwrap().video_tracks[0].items[0].clone();
+        let ctx = context();
+        let t = Tokens::for_kind(Default::default());
+        let big = i64::from(u32::MAX);
+        let rates = [(24000, 1001), (30, 1), (1000, 1), (1, 1), (1, big), (big, big), (0, 0), (-25, 1)];
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for width in [300.0, 0.0, -40.0, 0.001, 1.0e9, f32::NAN, f32::INFINITY] {
+                for duration in [1, 0, -7, filmcraft_time::TICKS_PER_SECOND, Tick::MAX.0 / 2] {
+                    for start in [0, Tick::MIN.0, Tick::MAX.0 / 2] {
+                        for (num, den) in rates {
+                            it.start = Tick(start);
+                            it.duration = Tick(duration);
+                            let ruler = Rect::from_min_size(pos2(10.0, 10.0), vec2(width, RULER_H));
+                            paint_ruler(ui.painter(), ruler, &it, filmcraft_time::FrameRate { num, den }, false, &t);
+                        }
+                    }
+                }
+            }
+        });
+        out.textures_delta.clear();
+    }
+
+    /// A five-second lane 300 px wide is labelled every two seconds, in sequence timecode.
+    #[test]
+    fn ruler_labels_sequence_timecode() {
+        let mut s = filmcraft_engine::Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        let mut it = s.active_sequence().unwrap().video_tracks[0].items[0].clone();
+        let rate = filmcraft_time::FrameRate { num: 24, den: 1 };
+        it.start = rate.tick_of(24 * 60);
+        it.duration = rate.tick_of(24 * 5);
+        let ctx = context();
+        let t = Tokens::for_kind(Default::default());
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_ruler(ui.painter(), Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, RULER_H)), &it, rate, false, &t);
+        });
+        out.textures_delta.clear();
+        fn texts(s: egui::Shape, out: &mut Vec<String>) {
+            match s {
+                egui::Shape::Vec(v) => v.into_iter().for_each(|s| texts(s, out)),
+                egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                _ => {}
+            }
+        }
+        let mut labels = Vec::new();
+        out.shapes.into_iter().for_each(|c| texts(c.shape, &mut labels));
+        assert_eq!(labels, ["00:01:00:00", "00:01:02:00", "00:01:04:00"]);
     }
 }
