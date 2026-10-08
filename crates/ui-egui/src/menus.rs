@@ -502,16 +502,22 @@ pub fn shortcut_text(s: &str) -> String {
     Chord::parse(s).map(|c| c.display(Platform::current())).unwrap_or_else(|_| s.to_string())
 }
 
-/// Parse "Cmd+Shift+K" into modifiers + key.
+/// Parse "Cmd+Shift+K" into the modifiers a chord requires + its key. Off macOS the Control key
+/// is the primary modifier, so `Ctrl` and `Cmd` are one key and both mean `command` (the engine's
+/// `Chord::effective` says the same): a physical Ctrl press carries `command` there, and egui's
+/// matching asks only for what the pattern names, so a `Ctrl+…` chord matches a `Cmd+…` binding
+/// and the other way round (#245). On a Mac they stay two keys.
 pub fn parse_shortcut(s: &str) -> Option<(egui::Modifiers, egui::Key)> {
     let mut m = egui::Modifiers::NONE;
     let mut key = None;
     let parts: Vec<&str> = if s == "+" { vec!["+"] } else { s.split('+').collect() };
+    let mac = cfg!(target_os = "macos");
     for p in parts {
         match p {
             "Cmd" => m.command = true,
             "Shift" => m.shift = true,
             "Alt" => m.alt = true,
+            "Ctrl" if !mac => m.command = true,
             "Ctrl" => m.ctrl = true,
             k => {
                 key = match k {
@@ -637,4 +643,34 @@ fn menu_entry(ui: &mut egui::Ui, it: &MenuItem) -> bool {
         ui.painter().line_segment([c + egui::vec2(-1.0, 3.0), c + egui::vec2(4.5, -3.5)], st);
     }
     r.clicked()
+}
+
+#[cfg(test)]
+mod parse_shortcut_tests {
+    use super::parse_shortcut;
+
+    /// Off macOS `Ctrl` and `Cmd` are the same key, so either spelling parses to the modifiers a
+    /// physical Ctrl press carries and matches a binding written the other way (#245).
+    #[test]
+    fn ctrl_and_cmd_are_one_key_off_macos() {
+        let (ctrl, k) = parse_shortcut("Ctrl+Z").unwrap();
+        let (cmd, k2) = parse_shortcut("Cmd+Z").unwrap();
+        assert_eq!((k, k2), (egui::Key::Z, egui::Key::Z));
+        if cfg!(target_os = "macos") {
+            assert_eq!((ctrl.ctrl, ctrl.command), (true, false));
+            assert_eq!((cmd.ctrl, cmd.command), (false, true));
+            assert!(!ctrl.matches_logically(cmd) && !cmd.matches_logically(ctrl), "two different keys on a Mac");
+        } else {
+            assert_eq!((ctrl.ctrl, ctrl.command), (false, true));
+            assert_eq!(ctrl, cmd, "one key off a Mac");
+            // what egui-winit reports for the physical key, and a bare `command` as tests send it
+            let physical = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+            assert!(physical.matches_logically(cmd) && physical.matches_logically(ctrl));
+            assert!(egui::Modifiers::COMMAND.matches_logically(ctrl));
+        }
+        assert!(!parse_shortcut("Z").unwrap().0.matches_logically(cmd), "a bare key never stands in for the chord");
+        let (m, k) = parse_shortcut("Cmd+Shift+K").unwrap();
+        assert!(m.command && m.shift && !m.alt && k == egui::Key::K);
+        assert_eq!(parse_shortcut("+").map(|(_, k)| k), Some(egui::Key::Plus));
+    }
 }

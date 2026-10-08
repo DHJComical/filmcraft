@@ -62,10 +62,23 @@ fn err(e: impl std::fmt::Display) -> Outcome {
     Outcome::Done(json!({"ok": false, "error": e.to_string()}))
 }
 
+/// Modifier flags from `{modifiers: {ctrl, command, shift, alt}}` (or the same keys at the top
+/// level), as the OS would report them pressed.
 fn modifiers(p: &Value) -> egui::Modifiers {
     let m = p.get("modifiers").unwrap_or(p);
     let b = |k: &str| m.get(k).and_then(Value::as_bool).unwrap_or(false);
-    egui::Modifiers { alt: b("alt"), ctrl: b("ctrl"), shift: b("shift"), mac_cmd: cfg!(target_os = "macos") && b("command"), command: b("command") }
+    as_pressed(egui::Modifiers { alt: b("alt"), ctrl: b("ctrl"), shift: b("shift"), mac_cmd: cfg!(target_os = "macos") && b("command"), command: b("command") })
+}
+
+/// `m` as egui-winit reports a physical press: off macOS Control is the primary modifier, so
+/// `ctrl` and `command` are one key and a press of either carries both. A synthetic `Ctrl+Z` then
+/// matches a `Cmd+Z` binding exactly as the real key does (#245).
+fn as_pressed(mut m: egui::Modifiers) -> egui::Modifiers {
+    if !cfg!(target_os = "macos") && (m.ctrl || m.command) {
+        m.ctrl = true;
+        m.command = true;
+    }
+    m
 }
 
 /// Resolve a point from `{id}` (element centre) or `{x, y}`.
@@ -332,9 +345,8 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
         }
         "ui.key" => {
             let Some(name) = s("key") else { return err("missing `key`") };
-            let Some((mut m, key)) = crate::menus::parse_shortcut(name) else { return err(format!("unknown key `{name}`")) };
-            let extra = modifiers(p);
-            m |= extra;
+            let Some((m, key)) = crate::menus::parse_shortcut(name) else { return err(format!("unknown key `{name}`")) };
+            let m = as_pressed(m | modifiers(p));
             app.synthetic.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: m });
             app.synthetic.push(egui::Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers: m });
             Outcome::AfterInput
