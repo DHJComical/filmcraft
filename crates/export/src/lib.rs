@@ -253,6 +253,10 @@ pub struct ExportSettings {
     /// sequence's HDR space and signal it (VUI / `colr` / `mdcv` / `clli` / SEI).
     #[serde(default)]
     pub sdr: bool,
+    /// Keep the alpha channel in PNG and TIFF sequences (straight alpha, Premiere's "Include
+    /// Alpha Channel"). Off, every frame is flattened over black (#160). Other formats ignore it.
+    #[serde(default)]
+    pub alpha: bool,
     /// Output frame size (None = Match Source: the sequence size times `scale`).
     pub frame_size: Option<(u32, u32)>,
     /// Output frame rate (None = Match Source).
@@ -445,6 +449,7 @@ impl Default for ExportSettings {
             apv_profile: String::new(),
             mxf_video_codec: MxfVideoCodec::default(),
             sdr: false,
+            alpha: false,
             frame_size: None,
             frame_rate: None,
             scaling: Scaling::default(),
@@ -1266,11 +1271,12 @@ impl Write for SharedBuf {
 
 /// Encode straight sRGB RGBA8 pixels as a PNG file (thumbnails, previews).
 pub fn encode_png(rgba: Vec<u8>, w: u32, h: u32) -> Result<Vec<u8>> {
-    encode_still(Format::PngSequence, rgba, w, h)
+    encode_still(Format::PngSequence, rgba, w, h, false)
 }
 
-/// Encode one still of an image sequence (also Export Frame).
-pub fn encode_still(format: Format, rgba: Vec<u8>, w: u32, h: u32) -> Result<Vec<u8>> {
+/// Encode one still of an image sequence (also Export Frame). PNG always carries the alpha
+/// channel it is given; `alpha` keeps it in TIFF too, which is otherwise written as RGB.
+pub fn encode_still(format: Format, rgba: Vec<u8>, w: u32, h: u32, alpha: bool) -> Result<Vec<u8>> {
     let enc = |e: image::ImageError| ExportError::Encode(e.to_string());
     let mut out = std::io::Cursor::new(Vec::new());
     match format {
@@ -1279,9 +1285,12 @@ pub fn encode_still(format: Format, rgba: Vec<u8>, w: u32, h: u32) -> Result<Vec
         }
         Format::TiffSequence | Format::BmpSequence => {
             let img = image::RgbaImage::from_raw(w, h, rgba).ok_or_else(|| ExportError::Encode("frame size".into()))?;
-            let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
             let f = if format == Format::TiffSequence { image::ImageFormat::Tiff } else { image::ImageFormat::Bmp };
-            rgb.write_to(&mut out, f).map_err(enc)?
+            if alpha && format == Format::TiffSequence {
+                img.write_to(&mut out, f).map_err(enc)?
+            } else {
+                image::DynamicImage::ImageRgba8(img).to_rgb8().write_to(&mut out, f).map_err(enc)?
+            }
         }
         _ => return Err(ExportError::Unsupported(format!("{} is not an image sequence", format.label()))),
     }
@@ -1358,7 +1367,7 @@ pub fn export(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, so
                     let written: Vec<Result<u64>> = (f..end)
                         .into_par_iter()
                         .map(|fi| {
-                            let data = encode_still(settings.format, pipe.frame(fi, sources).0, w, h)?;
+                            let data = encode_still(settings.format, pipe.frame(fi, sources).0, w, h, settings.alpha)?;
                             write_output(settings, &pcm::image_sequence_path(&settings.path, (fi - f0) as u64, count), data)
                         })
                         .collect();

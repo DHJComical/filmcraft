@@ -37,16 +37,50 @@ pub struct Mp4Source {
     atrack: Option<usize>,
     video: GopCache,
     audio: Mutex<AudioState>,
-    /// Cumulative sample start frames for the audio track (for packet lookup).
+    /// Audio packet start positions in source sample frames (see [`audio_starts`]).
     audio_starts: Vec<i64>,
     /// Presentation offset of the audio track in its timescale (edit list, or Opus pre-skip).
     audio_offset: i64,
-    /// Decoder pre-roll after a seek, in audio track timescale units (0: prime with one packet).
+    /// Decoder pre-roll after a seek, in source sample frames (0: prime with one packet).
     audio_preroll: i64,
 }
 
 pub fn sniff(b: &[u8]) -> bool {
     b.len() >= 12 && matches!(&b[4..8], b"ftyp" | b"moov" | b"mdat" | b"wide" | b"free" | b"skip")
+}
+
+/// Audio packet start positions in source sample frames at `rate`: the running total of the sample
+/// durations, except that packets which all decode to the same length (AAC, MPEG audio, AC-3) run
+/// on from one another, resynchronising to the total only across gaps of more than half a packet.
+/// A remux from Matroska (OBS's) carries the millisecond rounding of its timestamps into the
+/// durations: 1008, 1008, 1056… for 1024-sample AAC frames at 48 kHz (see
+/// [`crate::audio::contiguous_starts`]).
+fn audio_starts(file: &Mp4File, bytes: &crate::Src, ti: usize, rate: u32) -> Vec<i64> {
+    use crate::audio::{FixedFrames, PacketTime, contiguous_starts, fixed_packet_samples};
+    let Some(t) = file.tracks.get(ti) else { return Vec::new() };
+    let ts = i128::from(t.timescale.max(1));
+    let mut total = 0i128;
+    let stamps: Vec<i64> = t
+        .samples
+        .iter()
+        .map(|s| {
+            let at = total * i128::from(rate) / ts;
+            total += i128::from(s.duration);
+            i64::try_from(at).unwrap_or(i64::MAX)
+        })
+        .collect();
+    let first = || file.read_sample(bytes, ti, 0).unwrap_or_default();
+    let frame = match t.entries.first().map(|e| &e.codec) {
+        Some(CodecConfig::Aac(a)) => fixed_packet_samples(FixedFrames::Aac(&a.asc), &[], rate),
+        Some(CodecConfig::Mp3) => fixed_packet_samples(FixedFrames::MpegAudio, &first(), rate),
+        Some(CodecConfig::Ac3 { .. }) => fixed_packet_samples(FixedFrames::Ac3, &first(), rate),
+        _ => None,
+    };
+    let Some(frame) = frame else { return stamps };
+    // samples per track timescale unit, rounded up: how coarse the running total is
+    let unit = i64::try_from((i128::from(rate) + ts - 1) / ts).unwrap_or(i64::MAX);
+    let packets = stamps.iter().map(|&stamp| PacketTime { stamp, stamped: true, samples: Some(frame) });
+    contiguous_starts(packets, (frame / 2).max(unit.saturating_mul(2).saturating_add(1)))
 }
 
 /// HDR static metadata from the sample entry's `mdcv` / `clli` boxes (0 = unknown).
@@ -240,20 +274,8 @@ impl Mp4Source {
             start_timecode,
             file_size: Some(bytes.0.len()),
         };
-        let audio_starts = atrack
-            .map(|i| {
-                let t = &file.tracks[i];
-                let mut acc = 0i64;
-                t.samples
-                    .iter()
-                    .map(|s| {
-                        let st = acc;
-                        acc += s.duration as i64;
-                        st
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let audio_rate = info.audio.as_ref().map_or(48_000, |a| a.sample_rate);
+        let audio_starts = atrack.map(|i| audio_starts(&file, &bytes, i, audio_rate)).unwrap_or_default();
         let (audio_offset, audio_preroll) = atrack
             .map(|i| {
                 let t = &file.tracks[i];
@@ -261,7 +283,8 @@ impl Mp4Source {
                 match &t.entries[0].codec {
                     CodecConfig::Opus(o) => {
                         let off = if t.edit_offset != 0 { t.edit_offset } else { -(o.pre_skip as i64) * ts / 48_000 };
-                        (off, (crate::audio::OPUS_PRE_ROLL as u64 * ts as u64).div_ceil(48_000) as i64)
+                        // (Opus plays at 48 kHz: the pre-roll is in its sample frames)
+                        (off, crate::audio::OPUS_PRE_ROLL as i64)
                     }
                     _ => (t.edit_offset, 0),
                 }
@@ -393,14 +416,12 @@ impl MediaSource for Mp4Source {
         let offset = i128::from(self.audio_offset) * i128::from(src_rate) / i128::from(track.timescale.max(1));
         let s0 = i64::try_from(i128::from(p0) - offset).unwrap_or(if offset > 0 { i64::MIN } else { i64::MAX });
         let need = (frames as f64 * ratio).ceil() as i64 + 2;
-        // Samples-per-unit: the track timescale is usually the sample rate for audio.
-        let unit = src_rate as f64 / track.timescale.max(1) as f64;
         let mut src: Vec<Vec<f32>> = vec![vec![0.0; need.max(0) as usize]; ch];
         let mut st = self.audio.lock().unwrap_or_else(|e| e.into_inner());
-        let first = self.audio_starts.partition_point(|&x| (x as f64 * unit) as i64 <= s0.max(0)).saturating_sub(1);
+        let first = self.audio_starts.partition_point(|&x| x <= s0.max(0)).saturating_sub(1);
         let mut i = first;
         while i < track.samples.len() {
-            let pk_start = (self.audio_starts[i] as f64 * unit) as i64;
+            let pk_start = self.audio_starts[i];
             if pk_start >= s0.saturating_add(need) {
                 break;
             }
