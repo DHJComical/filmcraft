@@ -348,7 +348,8 @@ impl Nvenc {
             return Err("an 8-bit picture for a Main 10 encoder".into());
         }
         let (w, h) = (self.size.0 as usize, self.size.1 as usize);
-        if y.len() < w * h || u.len() < w / 2 * (h / 2) || v.len() < w / 2 * (h / 2) {
+        let (luma, chroma) = (w.saturating_mul(h), (w / 2).saturating_mul(h / 2));
+        if y.len() < luma || u.len() < chroma || v.len() < chroma {
             return Err("the picture is smaller than the encoder's size".into());
         }
         self.submit_picture(index, |l| fill_nv12(l, y, u, v, w, h))
@@ -361,7 +362,8 @@ impl Nvenc {
             return Err("a 10-bit picture for a Main (8-bit) encoder".into());
         }
         let (w, h) = (self.size.0 as usize, self.size.1 as usize);
-        if y.len() < w * h || u.len() < w / 2 * (h / 2) || v.len() < w / 2 * (h / 2) {
+        let (luma, chroma) = (w.saturating_mul(h), (w / 2).saturating_mul(h / 2));
+        if y.len() < luma || u.len() < chroma || v.len() < chroma {
             return Err("the picture is smaller than the encoder's size".into());
         }
         self.submit_picture(index, |l| fill_p010(l, y, u, v, w, h))
@@ -457,11 +459,11 @@ fn fill_p010(l: Locked<'_>, y: &[u16], u: &[u16], v: &[u16], w: usize, h: usize)
     if w == 0 || pitch == 0 {
         return;
     }
-    let put = |dst: &mut [u8], code: u16| dst.copy_from_slice(&((code & 0x3ff) << 6).to_le_bytes());
+    let code = |c: u16| ((c & 0x3ff) << 6).to_le_bytes();
     for (row, dst) in y.chunks_exact(w).zip(luma.chunks_exact_mut(pitch)).take(h) {
         let Some(dst) = dst.get_mut(..w.saturating_mul(2)) else { continue };
-        for (d, c) in dst.chunks_exact_mut(2).zip(row) {
-            put(d, *c);
+        for (d, c) in dst.as_chunks_mut::<2>().0.iter_mut().zip(row) {
+            *d = code(*c);
         }
     }
     let cw = w / 2;
@@ -470,10 +472,9 @@ fn fill_p010(l: Locked<'_>, y: &[u16], u: &[u16], v: &[u16], w: usize, h: usize)
     }
     for ((ur, vr), dst) in u.chunks_exact(cw).zip(v.chunks_exact(cw)).zip(chroma.chunks_exact_mut(pitch)).take(h / 2) {
         let Some(dst) = dst.get_mut(..w.saturating_mul(2)) else { continue };
-        for ((d, a), b) in dst.chunks_exact_mut(4).zip(ur).zip(vr) {
-            let (du, dv) = d.split_at_mut(2);
-            put(du, *a);
-            put(dv, *b);
+        for ((d, a), b) in dst.as_chunks_mut::<4>().0.iter_mut().zip(ur).zip(vr) {
+            let ([u0, u1], [v0, v1]) = (code(*a), code(*b));
+            *d = [u0, u1, v0, v1];
         }
     }
 }

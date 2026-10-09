@@ -1229,8 +1229,7 @@ pub fn rgbf_to_yuv420_10(rgb: &[f32], w: usize, h: usize, kr: f32, kb: f32, y: &
         for (dy, yrow) in yr.chunks_exact_mut(w).enumerate().take(rows) {
             let row = cy * 2 + dy;
             let Some(src) = rgb.get(row * w * 3..(row + 1) * w * 3) else { continue };
-            for (x, (p, yo)) in src.chunks_exact(3).zip(yrow.iter_mut()).enumerate() {
-                let &[r, g, b] = p else { continue };
+            for (x, (&[r, g, b], yo)) in src.as_chunks::<3>().0.iter().zip(yrow.iter_mut()).enumerate() {
                 let (r, g, b) = (unit(r), unit(g), unit(b));
                 let yy = kr * r + kg * g + kb * b;
                 *yo = code(64.0 + 876.0 * yy);

@@ -114,7 +114,7 @@ fn assert_ffmpeg_decodes(ffmpeg: &Path, path: &str) {
 fn ffmpeg_first_picture(ffmpeg: &Path, path: &str, w: usize, h: usize) -> (Vec<u16>, Vec<u16>, Vec<u16>) {
     let out = Command::new(ffmpeg).args(["-v", "error", "-i", path, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "yuv420p10le", "-"]).output().unwrap();
     assert!(out.status.success(), "ffmpeg: {}", String::from_utf8_lossy(&out.stderr));
-    let samples: Vec<u16> = out.stdout.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+    let samples: Vec<u16> = out.stdout.as_chunks::<2>().0.iter().map(|b| u16::from_le_bytes(*b)).collect();
     assert_eq!(samples.len(), w * h * 3 / 2, "one yuv420p10le picture");
     let (y, c) = samples.split_at(w * h);
     let (u, v) = c.split_at(c.len() / 2);
