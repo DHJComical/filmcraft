@@ -42,8 +42,9 @@ fn system_font() -> Option<Arc<FontData>> {
     .clone()
 }
 
-/// Append Chinese faces after Latin UI fonts and before the Japanese fallbacks. This keeps the
-/// interface's Latin typography and uses Chinese glyph forms for media and track names.
+/// Append Chinese faces after the Latin UI fonts and the Japanese fallbacks. This keeps the
+/// interface's Latin typography and Japanese glyph forms, and covers the simplified and
+/// traditional hanzi in media and track names that Japanese fonts lack.
 pub(crate) fn install(fonts: &mut FontDefinitions) {
     let chinese: Vec<_> = craft_fonts().collect();
     if chinese.is_empty() {

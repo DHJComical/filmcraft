@@ -269,8 +269,10 @@ pub fn install(ctx: &egui::Context, t: &Tokens) {
     fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "jbmono".into());
     fonts.families.insert(FontFamily::Name("semibold".into()), vec!["inter-semibold".into(), "inter".into()]);
     fonts.families.insert(FontFamily::Name("medium".into()), vec!["inter-medium".into(), "inter".into()]);
-    crate::cjk::install(&mut fonts);
+    // Japanese before Chinese: the two share code points, and Japanese text must keep Japanese
+    // glyph forms; Chinese faces still cover the hanzi Japanese fonts lack
     add_craft_fonts(&mut fonts);
+    crate::cjk::install(&mut fonts);
     ctx.set_fonts(fonts);
     apply_visuals(ctx, t);
 }
@@ -376,7 +378,7 @@ mod tests {
         let ctx = egui::Context::default();
         for kind in [ThemeKind::Dark, ThemeKind::Medium, ThemeKind::Light] {
             install(&ctx, &Tokens::for_kind(kind));
-            let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+            ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
             ctx.fonts_mut(|fonts| {
                 for family in font_families() {
                     let font = FontId::new(13.0, family);
@@ -391,6 +393,8 @@ mod tests {
                 }
             });
         }
+        // the layouts above put glyphs in the atlas: take that update so it isn't dropped unapplied
+        ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
     }
 
     /// Built with craft-fonts: every font family ends with the Japanese faces (BIZ UDPGothic
