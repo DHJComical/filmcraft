@@ -432,6 +432,9 @@ pub struct UiState {
     /// Delete Tracks dialog draft.
     #[serde(default)]
     pub delete_tracks: DeleteTracksDraft,
+    /// Sequence Settings dialog draft.
+    #[serde(default)]
+    pub sequence_settings: SequenceSettingsDraft,
     /// On-monitor text editing (Type tool / double-click on a text layer).
     #[serde(default)]
     pub gfx_edit: Option<GfxEdit>,
@@ -735,6 +738,49 @@ impl Default for AddTracksDraft {
     }
 }
 
+/// The Sequence Settings dialog (Sequence ▸ Sequence Settings…), filled from the active sequence
+/// when it opens (`panels::sequence_settings::open`). `tab`: `general`, `color` or `vr`; the
+/// timebase is `fps_num`/`fps_den`; `mix`: `Stereo`, `Mono`, `5.1` or `Adaptive`; `working_space`:
+/// a [`filmcraft_color::WorkingSpace`] id. `scale_motion` is "Scale motion effects proportionally
+/// when changing frame size", on by default as in Premiere.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SequenceSettingsDraft {
+    pub tab: String,
+    pub fps_num: i64,
+    pub fps_den: i64,
+    pub width: u32,
+    pub height: u32,
+    pub scale_motion: bool,
+    pub drop_frame: bool,
+    pub mix: String,
+    pub sample_rate: u32,
+    pub max_render_quality: bool,
+    pub working_space: String,
+    pub wide_gamut: bool,
+    pub auto_tone_map: bool,
+}
+
+impl Default for SequenceSettingsDraft {
+    fn default() -> Self {
+        Self {
+            tab: "general".into(),
+            fps_num: 24_000,
+            fps_den: 1001,
+            width: 1920,
+            height: 1080,
+            scale_motion: true,
+            drop_frame: false,
+            mix: "Stereo".into(),
+            sample_rate: 48_000,
+            max_render_quality: false,
+            working_space: "rec709".into(),
+            wide_gamut: false,
+            auto_tone_map: true,
+        }
+    }
+}
+
 /// The Delete Tracks dialog (Sequence ▸ Delete Tracks…): per kind, whether to delete and which
 /// track (`"empty"` = All Empty Tracks, or a track name such as `"V2"`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -820,6 +866,7 @@ impl Default for UiState {
             audio_gain: AudioGainDraft::default(),
             add_tracks: AddTracksDraft::default(),
             delete_tracks: DeleteTracksDraft::default(),
+            sequence_settings: SequenceSettingsDraft::default(),
             gfx_edit: None,
             pen_points: vec![],
             link_media: None,
