@@ -179,6 +179,36 @@ fn export_with_presets() {
     let v = json_out(&cli(&["--demo", "--data-dir", data_s, "export", q.to_str().unwrap(), "--preset", "Tiny WAV", "--queue", "--range", "entire"]));
     assert_eq!(v["items"][0]["status"], "done", "{v}");
     assert!(q.exists());
+    // a format that changes the extension: the completion message names the file written (#341)
+    let apv = dir.join("apv.mp4");
+    let o =
+        cli(&["--demo", "--data-dir", data_s, "export", apv.to_str().unwrap(), "--preset", "APV 422-10", "--start", "0", "--end", "0.1", "--scale", "0.125"]);
+    let v = json_out(&o);
+    let written = v["path"].as_str().unwrap().to_string();
+    assert!(written.ends_with("apv.mp4.mov") && std::path::Path::new(&written).exists(), "{v}");
+    let msg = String::from_utf8_lossy(&o.stderr);
+    assert!(msg.contains(&format!("exported {written} in ")), "{msg}");
+    let qa = dir.join("queued-apv.mp4");
+    let o = cli(&[
+        "--demo",
+        "--data-dir",
+        data_s,
+        "export",
+        qa.to_str().unwrap(),
+        "--preset",
+        "APV 422-10",
+        "--queue",
+        "--start",
+        "0",
+        "--end",
+        "0.1",
+        "--scale",
+        "0.125",
+    ]);
+    let v = json_out(&o);
+    let written = v["items"][0]["path"].as_str().unwrap().to_string();
+    assert!(written.ends_with("queued-apv.mp4.mov"), "{v}");
+    assert!(String::from_utf8_lossy(&o.stderr).contains(&format!("exported {written} in ")), "{}", String::from_utf8_lossy(&o.stderr));
     // unknown preset: exit status 1 and a message naming it
     let bad = cli(&["--demo", "--data-dir", data_s, "export", dir.join("x.mp4").to_str().unwrap(), "--preset", "No Such Preset"]);
     assert_eq!(bad.status.code(), Some(1));
