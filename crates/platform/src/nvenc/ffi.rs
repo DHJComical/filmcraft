@@ -30,7 +30,7 @@
 //! offsets are checked against a C compiler's by the generated `abi_tests.rs`.
 //!
 //! API 12.1 is targeted on purpose: it is understood by every driver since 531.x, and the encoder
-//! features used here (H.264, presets, rate control) are the same in later versions.
+//! features used here (H.264 and HEVC, presets, rate control) are the same in later versions.
 //!
 //! FFI module (docs/adr/0001-platform-ffi.md): plain `repr(C)` data, no logic.
 
@@ -82,6 +82,22 @@ pub const NV_ENC_PIC_TYPE_I: u32 = 2;
 pub const NV_ENC_PIC_TYPE_IDR: u32 = 3;
 pub const NV_ENC_PIC_FLAG_EOS: u32 = 0x8;
 pub const NV_ENC_LEVEL_AUTOSELECT: u32 = 0;
+/// HEVC levels are `level × 30` (4.1 is 123), unlike H.264's `level × 10`.
+pub const NV_ENC_LEVEL_HEVC_1: u32 = 30;
+pub const NV_ENC_LEVEL_HEVC_2: u32 = 60;
+pub const NV_ENC_LEVEL_HEVC_21: u32 = 63;
+pub const NV_ENC_LEVEL_HEVC_3: u32 = 90;
+pub const NV_ENC_LEVEL_HEVC_31: u32 = 93;
+pub const NV_ENC_LEVEL_HEVC_4: u32 = 120;
+pub const NV_ENC_LEVEL_HEVC_41: u32 = 123;
+pub const NV_ENC_LEVEL_HEVC_5: u32 = 150;
+pub const NV_ENC_LEVEL_HEVC_51: u32 = 153;
+pub const NV_ENC_LEVEL_HEVC_52: u32 = 156;
+pub const NV_ENC_LEVEL_HEVC_6: u32 = 180;
+pub const NV_ENC_LEVEL_HEVC_61: u32 = 183;
+pub const NV_ENC_LEVEL_HEVC_62: u32 = 186;
+pub const NV_ENC_TIER_HEVC_MAIN: u32 = 0;
+pub const NV_ENC_HEVC_CUSIZE_AUTOSELECT: u32 = 0;
 pub const NV_ENC_H264_ENTROPY_CODING_MODE_CABAC: u32 = 1;
 pub const NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED: u32 = 5;
 pub const NV_ENC_VUI_COLOR_PRIMARIES_BT709: u32 = 1;
@@ -97,9 +113,11 @@ pub const NV_ENC_CAPS_WIDTH_MIN: u32 = 45;
 pub const NV_ENC_CAPS_HEIGHT_MIN: u32 = 46;
 
 pub const NV_ENC_CODEC_H264_GUID: GUID = GUID::from_values(0x6bc82762, 0x4e63, 0x4ca4, [0xaa, 0x85, 0x1e, 0x50, 0xf3, 0x21, 0xf6, 0xbf]);
+pub const NV_ENC_CODEC_HEVC_GUID: GUID = GUID::from_values(0x790cdc88, 0x4522, 0x4d7b, [0x94, 0x25, 0xbd, 0xa9, 0x97, 0x5f, 0x76, 0x03]);
 pub const NV_ENC_H264_PROFILE_BASELINE_GUID: GUID = GUID::from_values(0x0727bcaa, 0x78c4, 0x4c83, [0x8c, 0x2f, 0xef, 0x3d, 0xff, 0x26, 0x7c, 0x6a]);
 pub const NV_ENC_H264_PROFILE_MAIN_GUID: GUID = GUID::from_values(0x60b5c1d4, 0x67fe, 0x4790, [0x94, 0xd5, 0xc4, 0x72, 0x6d, 0x7b, 0x6e, 0x6d]);
 pub const NV_ENC_H264_PROFILE_HIGH_GUID: GUID = GUID::from_values(0xe7cbc309, 0x4f7a, 0x4b89, [0xaf, 0x2a, 0xd5, 0x37, 0xc9, 0x2b, 0xe3, 0x10]);
+pub const NV_ENC_HEVC_PROFILE_MAIN_GUID: GUID = GUID::from_values(0xb514c39a, 0xb55b, 0x40fa, [0x87, 0x8f, 0xf1, 0x25, 0x3b, 0x4d, 0xfd, 0xec]);
 pub const NV_ENC_PRESET_P4_GUID: GUID = GUID::from_values(0x90a7b826, 0xdf06, 0x4862, [0xb9, 0xd2, 0xcd, 0x6d, 0x73, 0xa0, 0x86, 0x81]);
 pub const NV_ENC_PRESET_P5_GUID: GUID = GUID::from_values(0x21c6e6b4, 0x297a, 0x4cba, [0x99, 0x8f, 0xb6, 0xcb, 0xde, 0x72, 0xad, 0xe3]);
 
@@ -235,10 +253,58 @@ pub const H264_OUTPUT_AUD: u32 = 1 << 6;
 pub const H264_REPEAT_SPSPPS: u32 = 1 << 12;
 pub const H264_OUTPUT_RECOVERY_POINT_SEI: u32 = 1 << 9;
 
+/// `NV_ENC_CONFIG_HEVC_VUI_PARAMETERS` is a typedef of the H.264 VUI structure.
+pub type NV_ENC_CONFIG_HEVC_VUI_PARAMETERS = NV_ENC_CONFIG_H264_VUI_PARAMETERS;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NV_ENC_CONFIG_HEVC {
+    pub level: u32,
+    pub tier: u32,
+    pub minCUSize: u32,
+    pub maxCUSize: u32,
+    /// useConstrainedIntraPred:1, disableDeblockAcrossSliceBoundary:1, outputBufferingPeriodSEI:1,
+    /// outputPictureTimingSEI:1, outputAUD:1, enableLTR:1, disableSPSPPS:1, repeatSPSPPS:1,
+    /// enableIntraRefresh:1, chromaFormatIDC:2, pixelBitDepthMinus8:3, enableFillerDataInsertion:1,
+    /// enableConstrainedEncoding:1, enableAlphaLayerEncoding:1, singleSliceIntraRefresh:1,
+    /// outputRecoveryPointSEI:1, outputTimeCodeSEI:1, reserved:12.
+    pub flags: u32,
+    pub idrPeriod: u32,
+    pub intraRefreshPeriod: u32,
+    pub intraRefreshCnt: u32,
+    pub maxNumRefFramesInDPB: u32,
+    pub ltrNumFrames: u32,
+    pub vpsId: u32,
+    pub spsId: u32,
+    pub ppsId: u32,
+    pub sliceMode: u32,
+    pub sliceModeData: u32,
+    pub maxTemporalLayersMinus1: u32,
+    pub hevcVUIParameters: NV_ENC_CONFIG_HEVC_VUI_PARAMETERS,
+    pub ltrTrustMode: u32,
+    pub useBFramesAsRef: u32,
+    pub numRefL0: u32,
+    pub numRefL1: u32,
+    pub reserved1: [u32; 214],
+    pub reserved2: [*mut c_void; 64],
+}
+
+pub const HEVC_OUTPUT_AUD: u32 = 1 << 4;
+pub const HEVC_DISABLE_SPSPPS: u32 = 1 << 6;
+pub const HEVC_REPEAT_SPSPPS: u32 = 1 << 7;
+pub const HEVC_ENABLE_INTRA_REFRESH: u32 = 1 << 8;
+/// `chromaFormatIDC` (2 bits) and `pixelBitDepthMinus8` (3 bits) share the flags word.
+pub const HEVC_CHROMA_FORMAT_SHIFT: u32 = 9;
+pub const HEVC_CHROMA_FORMAT_MASK: u32 = 3 << HEVC_CHROMA_FORMAT_SHIFT;
+pub const HEVC_PIXEL_BIT_DEPTH_SHIFT: u32 = 11;
+pub const HEVC_PIXEL_BIT_DEPTH_MASK: u32 = 7 << HEVC_PIXEL_BIT_DEPTH_SHIFT;
+pub const HEVC_OUTPUT_RECOVERY_POINT_SEI: u32 = 1 << 18;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub union NV_ENC_CODEC_CONFIG {
     pub h264Config: NV_ENC_CONFIG_H264,
+    pub hevcConfig: NV_ENC_CONFIG_HEVC,
     pub reserved: [u32; 320],
     align: [*mut c_void; 0],
 }
