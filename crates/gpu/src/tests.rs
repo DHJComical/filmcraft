@@ -204,7 +204,7 @@ fn gpu_push_matches_cpu_with_alpha_and_surrounding_blends() {
                 c.composite_prepared(&plan, Some(&prepare(&plan)));
                 let (_, _, gpu) = c.read_output().expect("readback");
                 let mut diffs: Vec<u32> =
-                    cpu.chunks_exact(4).zip(gpu.chunks_exact(4)).map(|(a, b)| (0..3).map(|k| a[k].abs_diff(b[k]) as u32).max().unwrap()).collect();
+                    cpu.as_chunks::<4>().0.iter().zip(gpu.as_chunks::<4>().0).map(|(a, b)| (0..3).map(|k| a[k].abs_diff(b[k]) as u32).max().unwrap()).collect();
                 diffs.sort_unstable();
                 let p99 = diffs[diffs.len() * 99 / 100];
                 let mean = diffs.iter().sum::<u32>() as f64 / diffs.len() as f64;
