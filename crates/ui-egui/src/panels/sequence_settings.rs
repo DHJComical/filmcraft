@@ -28,6 +28,7 @@ use filmcraft_time::FrameRate;
 use serde_json::{Map, Value, json};
 
 use crate::FilmcraftApp;
+use crate::i18n::t;
 use crate::state::SequenceSettingsDraft;
 
 const NOT_YET: &str = "Not supported in FilmCraft yet";
@@ -110,26 +111,26 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
 }
 
 fn timebase_label(r: FrameRate) -> String {
-    format!("{} frames/second", r.label())
+    tlf!("{rate} frames/second", rate = r.label())
 }
 
 /// The Video Display Format choices for a timebase: drop-frame / non-drop-frame timecode for the
 /// NTSC rates, plain timecode otherwise (`(id, label)`).
 fn timecode_formats(r: FrameRate) -> Vec<(&'static str, String)> {
     if r.supports_drop_frame() {
-        vec![("df", format!("{} fps Drop-Frame Timecode", r.label())), ("ndf", format!("{} fps Non Drop-Frame Timecode", r.label()))]
+        vec![("df", tlf!("{rate} fps Drop-Frame Timecode", rate = r.label())), ("ndf", tlf!("{rate} fps Non Drop-Frame Timecode", rate = r.label()))]
     } else {
-        vec![("tc", format!("{} fps Timecode", r.label()))]
+        vec![("tc", tlf!("{rate} fps Timecode", rate = r.label()))]
     }
 }
 
 fn par_label(par: (u32, u32)) -> String {
     if par.0 == par.1 {
-        "Square Pixels (1.0)".into()
+        tl!("Square Pixels (1.0)").into()
     } else if par.1 > 0 {
-        format!("Custom ({:.4})", f64::from(par.0) / f64::from(par.1))
+        tlf!("Custom ({ratio})", ratio = format!("{:.4}", f64::from(par.0) / f64::from(par.1)))
     } else {
-        "Custom".into()
+        tl!("Custom").into()
     }
 }
 
@@ -177,7 +178,7 @@ fn row<R>(ui: &mut egui::Ui, label_w: f32, label: &str, enabled: bool, add: impl
     ui.horizontal(|ui| {
         let h = ui.spacing().interact_size.y;
         ui.allocate_ui_with_layout(egui::vec2(label_w, h), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_enabled(enabled, egui::Label::new(label));
+            ui.add_enabled(enabled, egui::Label::new(t(label)));
         });
         add(ui)
     })
@@ -187,21 +188,21 @@ fn row<R>(ui: &mut egui::Ui, label_w: f32, label: &str, enabled: bool, add: impl
 /// A greyed-out list showing `value`, with the "not supported yet" hint (or `hint`).
 fn fixed_combo(ui: &mut egui::Ui, elems: &mut Elems, id: &str, value: &str, width: f32, hint: &str) {
     let r = ui
-        .add_enabled_ui(false, |ui| egui::ComboBox::from_id_salt(("seq-settings-fixed", id)).selected_text(value).width(width).show_ui(ui, |_| {}).response)
+        .add_enabled_ui(false, |ui| egui::ComboBox::from_id_salt(("seq-settings-fixed", id)).selected_text(t(value)).width(width).show_ui(ui, |_| {}).response)
         .inner
-        .on_disabled_hover_text(hint);
+        .on_disabled_hover_text(t(hint));
     elems.push((format!("sequenceSettings.{id}"), r.rect, value.to_string()));
 }
 
 /// A greyed-out read-only value (a number field in Premiere), with the hint.
 fn fixed_value(ui: &mut egui::Ui, elems: &mut Elems, id: &str, value: &str) {
-    let r = ui.add_enabled(false, egui::Button::new(value).min_size(egui::vec2(64.0, 0.0))).on_disabled_hover_text(NOT_YET);
+    let r = ui.add_enabled(false, egui::Button::new(value).min_size(egui::vec2(64.0, 0.0))).on_disabled_hover_text(t(NOT_YET));
     elems.push((format!("sequenceSettings.{id}"), r.rect, value.to_string()));
 }
 
 fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(6.0);
-    ui.label(egui::RichText::new(title).strong());
+    ui.label(egui::RichText::new(t(title)).strong());
     ui.group(|ui| {
         ui.set_width(ui.available_width());
         add(ui);
@@ -212,7 +213,7 @@ fn general(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, cur: &SequenceSetti
     let font = egui::TextStyle::Body.resolve(ui.style());
     let label_w = ["Preview File Format:", "Pixel Aspect Ratio:", "Number of Channels:"]
         .iter()
-        .map(|l| ui.painter().layout_no_wrap(l.to_string(), font.clone(), egui::Color32::WHITE).size().x)
+        .map(|l| ui.painter().layout_no_wrap(t(l).to_string(), font.clone(), egui::Color32::WHITE).size().x)
         .fold(0.0, f32::max);
     let list_w = 260.0;
     row(ui, label_w, "Editing Mode:", false, |ui| fixed_combo(ui, elems, "editingMode", "Custom", list_w, NOT_YET));
@@ -246,15 +247,15 @@ fn general(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, cur: &SequenceSetti
         row(ui, label_w, "Frame Size:", true, |ui| {
             let w = ui.add(egui::DragValue::new(&mut d.width).range(1..=filmcraft_project::MAX_FRAME_SIDE).speed(1.0));
             elems.push(("sequenceSettings.width".into(), w.rect, d.width.to_string()));
-            ui.label("horizontal");
+            ui.label(tl!("horizontal"));
             let h = ui.add(egui::DragValue::new(&mut d.height).range(1..=filmcraft_project::MAX_FRAME_SIDE).speed(1.0));
             elems.push(("sequenceSettings.height".into(), h.rect, d.height.to_string()));
-            ui.label("vertical");
+            ui.label(tl!("vertical"));
             let a = aspect(d.width, d.height);
             let ar = ui.label(&a);
             elems.push(("sequenceSettings.aspect".into(), ar.rect, a));
         });
-        let r = ui.checkbox(&mut d.scale_motion, "Scale motion effects proportionally when changing frame size");
+        let r = ui.checkbox(&mut d.scale_motion, tl!("Scale motion effects proportionally when changing frame size"));
         elems.push(("sequenceSettings.scaleMotion".into(), r.rect, d.scale_motion.to_string()));
         row(ui, label_w, "Pixel Aspect Ratio:", false, |ui| fixed_combo(ui, elems, "par", &par_label(cur.par), list_w, NOT_YET));
         row(ui, label_w, "Fields:", false, |ui| fixed_combo(ui, elems, "fields", "No Fields (Progressive Scan)", list_w, NOT_YET));
@@ -272,7 +273,7 @@ fn general(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, cur: &SequenceSetti
                     elems.push((format!("sequenceSettings.videoDisplay.option.{id}"), o.rect, label.clone()));
                 }
                 for label in ["Feet + Frames 16mm", "Feet + Frames 35mm", "Frames"] {
-                    ui.add_enabled(false, egui::Button::selectable(false, label)).on_disabled_hover_text(NOT_YET);
+                    ui.add_enabled(false, egui::Button::selectable(false, t(label))).on_disabled_hover_text(t(NOT_YET));
                 }
             });
             elems.push(("sequenceSettings.videoDisplay".into(), resp.response.rect, shown));
@@ -281,14 +282,14 @@ fn general(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, cur: &SequenceSetti
     section(ui, "Audio", |ui| {
         row(ui, label_w, "Channel Format:", true, |ui| {
             let shown = d.mix.clone();
-            let resp = egui::ComboBox::from_id_salt("seq-settings-mix").selected_text(&shown).width(120.0).show_ui(ui, |ui| {
+            let resp = egui::ComboBox::from_id_salt("seq-settings-mix").selected_text(t(&shown)).width(120.0).show_ui(ui, |ui| {
                 for m in MIXES {
-                    let o = ui.selectable_value(&mut d.mix, m.to_string(), m);
+                    let o = ui.selectable_value(&mut d.mix, m.to_string(), t(m));
                     elems.push((format!("sequenceSettings.channelFormat.option.{m}"), o.rect, m.to_string()));
                 }
             });
             elems.push(("sequenceSettings.channelFormat".into(), resp.response.rect, shown));
-            ui.add_enabled(false, egui::Label::new("Number of Channels:"));
+            ui.add_enabled(false, egui::Label::new(tl!("Number of Channels:")));
             let n = match d.mix.as_str() {
                 "Mono" => "1",
                 "5.1" => "6",
@@ -318,57 +319,57 @@ fn general(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, cur: &SequenceSetti
     section(ui, "Video Previews", |ui| {
         row(ui, label_w, "Preview File Format:", false, |ui| {
             fixed_combo(ui, elems, "previewFormat", "QuickTime", list_w, NOT_YET);
-            ui.add_enabled(false, egui::Button::new("Configure…")).on_disabled_hover_text(NOT_YET);
+            ui.add_enabled(false, egui::Button::new(tl!("Configure…"))).on_disabled_hover_text(t(NOT_YET));
         });
         row(ui, label_w, "Codec:", false, |ui| fixed_combo(ui, elems, "previewCodec", &cur.preview_codec, list_w, NOT_YET));
         row(ui, label_w, "Width:", false, |ui| fixed_value(ui, elems, "previewWidth", &d.width.to_string()));
         row(ui, label_w, "Height:", false, |ui| {
             fixed_value(ui, elems, "previewHeight", &d.height.to_string());
-            ui.add_enabled(false, egui::Button::new("Reset")).on_disabled_hover_text(NOT_YET);
+            ui.add_enabled(false, egui::Button::new(tl!("Reset"))).on_disabled_hover_text(t(NOT_YET));
         });
         ui.horizontal(|ui| {
             let mut bit_depth = cur.max_bit_depth;
-            let r = ui.add_enabled(false, egui::Checkbox::new(&mut bit_depth, "Maximum Bit Depth")).on_disabled_hover_text(NOT_YET);
+            let r = ui.add_enabled(false, egui::Checkbox::new(&mut bit_depth, tl!("Maximum Bit Depth"))).on_disabled_hover_text(t(NOT_YET));
             elems.push(("sequenceSettings.maxBitDepth".into(), r.rect, bit_depth.to_string()));
-            let r = ui.checkbox(&mut d.max_render_quality, "Maximum Render Quality");
+            let r = ui.checkbox(&mut d.max_render_quality, tl!("Maximum Render Quality"));
             elems.push(("sequenceSettings.maxRenderQuality".into(), r.rect, d.max_render_quality.to_string()));
         });
         let mut linear = true;
-        let r = ui.add_enabled(false, egui::Checkbox::new(&mut linear, "Composite in Linear Color")).on_disabled_hover_text(LINEAR);
+        let r = ui.add_enabled(false, egui::Checkbox::new(&mut linear, tl!("Composite in Linear Color"))).on_disabled_hover_text(t(LINEAR));
         elems.push(("sequenceSettings.linearColor".into(), r.rect, "true".into()));
     });
 }
 
 fn color(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, elems: &mut Elems) {
     let font = egui::TextStyle::Body.resolve(ui.style());
-    let label_w = ui.painter().layout_no_wrap("Working Color Space:".to_string(), font, egui::Color32::WHITE).size().x;
+    let label_w = ui.painter().layout_no_wrap(tl!("Working Color Space:").to_string(), font, egui::Color32::WHITE).size().x;
     row(ui, label_w, "Working Color Space:", true, |ui| {
-        let shown = WorkingSpace::parse(&d.working_space).map_or(d.working_space.clone(), |w| w.label().to_string());
+        let shown = WorkingSpace::parse(&d.working_space).map_or(d.working_space.clone(), |w| t(w.label()).to_string());
         let resp = egui::ComboBox::from_id_salt("seq-settings-working-space").selected_text(&shown).width(220.0).show_ui(ui, |ui| {
             for w in WorkingSpace::ALL {
-                let o = ui.selectable_value(&mut d.working_space, w.id().to_string(), w.label());
+                let o = ui.selectable_value(&mut d.working_space, w.id().to_string(), t(w.label()));
                 elems.push((format!("sequenceSettings.workingSpace.option.{}", w.id()), o.rect, w.label().to_string()));
             }
         });
         elems.push(("sequenceSettings.workingSpace".into(), resp.response.rect, shown));
     });
     ui.add_space(4.0);
-    let r = ui.checkbox(&mut d.wide_gamut, "Wide gamut color (composite in BT.2020)");
+    let r = ui.checkbox(&mut d.wide_gamut, tl!("Wide gamut color (composite in BT.2020)"));
     elems.push(("sequenceSettings.wideGamut".into(), r.rect, d.wide_gamut.to_string()));
-    let r = ui.checkbox(&mut d.auto_tone_map, "Auto Tone Map Media (HDR and log into SDR)");
+    let r = ui.checkbox(&mut d.auto_tone_map, tl!("Auto Tone Map Media (HDR and log into SDR)"));
     elems.push(("sequenceSettings.autoToneMap".into(), r.rect, d.auto_tone_map.to_string()));
 }
 
 fn vr(ui: &mut egui::Ui, elems: &mut Elems) {
     let font = egui::TextStyle::Body.resolve(ui.style());
-    let label_w = ui.painter().layout_no_wrap("Captured View:".to_string(), font, egui::Color32::WHITE).size().x;
+    let label_w = ui.painter().layout_no_wrap(tl!("Captured View:").to_string(), font, egui::Color32::WHITE).size().x;
     row(ui, label_w, "Projection:", false, |ui| fixed_combo(ui, elems, "vr.projection", "None", 200.0, NOT_YET));
     row(ui, label_w, "Layout:", false, |ui| fixed_combo(ui, elems, "vr.layout", "Monoscopic", 200.0, NOT_YET));
     row(ui, label_w, "Captured View:", false, |ui| {
         fixed_value(ui, elems, "vr.horizontal", "0°");
-        ui.add_enabled(false, egui::Label::new("Horizontal"));
+        ui.add_enabled(false, egui::Label::new(tl!("Horizontal")));
         fixed_value(ui, elems, "vr.vertical", "0°");
-        ui.add_enabled(false, egui::Label::new("Vertical"));
+        ui.add_enabled(false, egui::Label::new(tl!("Vertical")));
     });
 }
 
@@ -383,13 +384,17 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
     let mut apply = false;
     let mut elems: Elems = Vec::new();
     let max_h = ctx.content_rect().height() * 0.8;
-    egui::Window::new("Sequence Settings").collapsible(false).resizable(false).default_width(620.0).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(
-        ctx,
-        |ui| {
+    egui::Window::new(tl!("Sequence Settings"))
+        .id(egui::Id::new("Sequence Settings"))
+        .collapsible(false)
+        .resizable(false)
+        .default_width(620.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
             ui.set_width(620.0);
             ui.horizontal(|ui| {
                 for (id, label) in [("general", "General"), ("color", "Color Management"), ("vr", "VR Properties")] {
-                    let r = ui.selectable_label(d.tab == id, label);
+                    let r = ui.selectable_label(d.tab == id, t(label));
                     if r.clicked() {
                         d.tab = id.to_string();
                     }
@@ -404,19 +409,18 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
             });
             ui.add_space(10.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let o = ui.add(egui::Button::new(egui::RichText::new("OK").color(egui::Color32::WHITE)).fill(accent));
+                let o = ui.add(egui::Button::new(egui::RichText::new(tl!("OK")).color(egui::Color32::WHITE)).fill(accent));
                 elems.push(("sequenceSettings.ok".into(), o.rect, "OK".into()));
                 if o.clicked() {
                     apply = true;
                 }
-                let c = ui.button("Cancel");
+                let c = ui.button(tl!("Cancel"));
                 elems.push(("sequenceSettings.cancel".into(), c.rect, "Cancel".into()));
                 if c.clicked() {
                     keep = false;
                 }
             });
-        },
-    );
+        });
     for (id, r, l) in elems {
         app.auto.add(&id, r, &l);
     }

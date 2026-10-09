@@ -157,12 +157,20 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
         if id == "app.language.japanese" && !crate::i18n::install_japanese_font(ctx) {
             return Err("no Japanese font is installed on this system (for example Noto Sans CJK JP); the interface stays in English".into());
         }
-        app.ui.language = match id {
+        let language = match id {
             "app.language.japanese" => crate::i18n::Language::Ja,
             "app.language.spanish" => crate::i18n::Language::Es,
             "app.language.portuguese" => crate::i18n::Language::PtBr,
             _ => crate::i18n::Language::En,
         };
+        // The preference is updated in memory before it is written, so a failed write (read-only
+        // or full disk) still switches the interface; it only can't be remembered for next time.
+        let saved = app.session.execute("prefs.set", json!({"key": "general.interfaceLanguage", "value": language.code()}));
+        app.ui.language = language;
+        crate::i18n::set_current(language);
+        if let Err(e) = saved {
+            app.ui.status = tlf!("The language changed but could not be saved: {e}", e);
+        }
         let items = menu_items(app);
         if let Some(hook) = app.hooks.shortcuts_changed.as_mut() {
             hook(&items);
@@ -298,7 +306,7 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
         id if crate::links::url_for(id).is_some() => {
             let url = crate::links::url_for(id).unwrap_or_default();
             crate::links::open(ctx, url);
-            app.ui.status = format!("Opened {url}");
+            app.ui.status = tlf!("Opened {url}", url);
             return Ok(json!({"url": url}));
         }
         "help.shortcuts" | "app.keyboardShortcuts" => {
@@ -607,7 +615,7 @@ pub fn menu_bar(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
             ui.menu_button(app.ui.language.tr(top), |ui| {
                 ui.set_min_width(260.0);
                 if mine.is_empty() {
-                    ui.add_enabled(false, egui::Button::new("(empty)"));
+                    ui.add_enabled(false, egui::Button::new(tl!("(empty)")));
                 }
                 menu_level(ui, &mine, 1, &mut clicked);
             });

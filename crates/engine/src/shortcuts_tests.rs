@@ -74,6 +74,9 @@ fn defaults_follow_the_registry_and_the_premiere_audit() {
 #[test]
 fn assign_reassigns_conflicts_and_undoes() {
     let mut s = Session::default();
+    // macOS Control folds into the primary modifier on Linux/Windows, so compare changes
+    // against the platform's original conflicts rather than assuming the set starts empty.
+    let baseline = s.execute("shortcuts.conflicts", json!({})).unwrap()["conflicts"].clone();
     let r = s.execute("shortcuts.set", json!({"command": "edit.undo", "keys": "Cmd+Shift+K"})).unwrap();
     assert_eq!(r["reassigned"][0]["command"], json!("sequence.addEditAllTracks"), "{r}");
     assert!(s.shortcuts.primary("sequence.addEditAllTracks").is_none());
@@ -85,12 +88,12 @@ fn assign_reassigns_conflicts_and_undoes() {
     s.execute("shortcuts.set", json!({"command": "edit.undo", "keys": "Cmd+Z", "add": true})).unwrap();
     assert_eq!(s.shortcuts.for_command("edit.undo").iter().filter(|b| b.panel.is_none()).count(), 2);
     let r = s.execute("shortcuts.set", json!({"command": "edit.redo", "keys": "M", "keepConflicts": true})).unwrap();
-    assert_eq!(r["conflicts"].as_array().unwrap().len(), 1, "{r}");
+    assert_eq!(r["conflicts"].as_array().unwrap().len(), baseline.as_array().unwrap().len() + 1, "{r}");
     let c = s.execute("shortcuts.conflicts", json!({"platform": "mac"})).unwrap();
     assert_eq!(c["conflicts"][0]["keys"], json!("M"));
     // undo / redo within the editor
     s.execute("shortcuts.undo", json!({})).unwrap();
-    assert!(s.execute("shortcuts.conflicts", json!({})).unwrap()["conflicts"].as_array().unwrap().is_empty());
+    assert_eq!(s.execute("shortcuts.conflicts", json!({})).unwrap()["conflicts"], baseline);
     s.execute("shortcuts.undo", json!({})).unwrap();
     s.execute("shortcuts.undo", json!({})).unwrap();
     assert_eq!(s.shortcuts.primary("edit.undo").as_deref(), Some("Cmd+Z"));
