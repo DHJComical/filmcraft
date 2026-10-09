@@ -26,6 +26,11 @@ sync_github_name = false
 display_name = "sanyamsingh001"
 sync_github_name = false
 
+[people.switch87]
+real_name = "Gert Pellin"
+display_name = "Gert Pellin"
+sync_github_name = false
+
 [people.swillunderscore]
 display_name = "Swill Software"
 

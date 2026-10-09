@@ -73,11 +73,19 @@ are never linked or shipped ([AGENTS.md](../AGENTS.md) §2).
   without a Direct3D 11 video device or the HEVC / VP9 / AV1 codec extensions of the Microsoft Store. The VP9 and
   AV1 fixtures (libvpx-vp9, libaom-av1; 360p, 1080p, 2160p, hidden alt-ref frames, two GOPs) need an ffmpeg with those encoders.
 
-The NVENC tests (`crates/platform/tests/nvenc.rs` and `nvenc_export.rs`, Windows only) skip without an
-NVIDIA GPU with NVENC. The FFI layout tests in `crates/platform/src/nvenc/abi_tests.rs` were generated
-from a C program built with MSVC against NVIDIA's MIT-licensed `nvEncodeAPI.h` (12.1); to regenerate
-them, print the sizes, alignments, offsets, constants and GUIDs of `src/nvenc/ffi.rs` from that
-program and update the asserts.
+The NVENC tests (`crates/platform/tests/nvenc.rs` and `nvenc_export.rs` for H.264, `nvenc_hevc.rs`,
+`nvenc_hevc_export.rs`, `nvenc_hevc_probe.rs` and `nvenc_hevc_warm.rs` for H.265; Windows only) skip,
+printing `SKIPPED`, without an NVIDIA GPU with NVENC (H.265: when the HEVC probe says there is no HEVC
+encoder; on a machine that has one, a configuration NVENC refuses fails the test). The FFI layout tests in
+`crates/platform/src/nvenc/abi_tests.rs` were generated from a C program built with MSVC
+(`cl` after `vcvars64.bat`) against NVIDIA's MIT-licensed `nvEncodeAPI.h` (12.1); the header and the
+program are not in the repository. To regenerate them, put the header in a scratch directory and
+write a program that prints, for every type, field, constant and GUID of `src/nvenc/ffi.rs` that the
+asserts name (H.264 and HEVC), `sizeof` / `alignof` / `offsetof`, the enum and macro values cast to
+64-bit integers and the GUIDs as 128-bit hex; for the bit-fields of the `flags` words, which
+`offsetof` cannot take, zero a structure, set that one field to its maximum and print the 32-bit word.
+Compare the numbers with the asserts (a difference is drift, which must be understood before
+anything is "fixed" to match) and add asserts for anything new.
 
 ### Pass criteria per codec
 
