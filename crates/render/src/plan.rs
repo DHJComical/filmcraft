@@ -1,9 +1,20 @@
 //! Frame plans for the GPU compositor.
 //!
-//! [`plan_frame`] resolves visible clips into decoded frames, placement matrices, opacity and blend modes; all 27 of [`Blend`] are GPU-composited.
-//! Supported standard effects carry [`LayerFx`], evaluated at frame time and run before Motion / Opacity / blend, in CPU order.
-//! Push uses isolated clip inputs in ordered [`PlanStep`] operations, preserving the lower-track canvas for later blends.
-//! Unsupported effects, masks, adjustment layers, nested transitions and other transitions retain CPU rendering at the owning layer or frame; [`execute_cpu`] is the reference.
+//! [`plan_frame`] resolves what is visible at a time into a list of layers the GPU can draw
+//! directly: a decoded source frame (YUV planes or RGBA), the matrix from source pixels to output
+//! pixels, an opacity and a blend mode (all 27 of [`Blend`] are composited by the GPU). A media
+//! clip whose enabled standard effects all have a GPU implementation ([`crate::gpufx`]) carries
+//! them as a [`LayerFx`]: their parameters evaluated at the frame's time, run by the GPU on the
+//! clip's working image before Motion places it, in the CPU's order (effects → Motion → Opacity /
+//! blend). Anything the shaders don't cover yet — other standard effects, masks, adjustment
+//! layers, nested sequences, transitions other than dissolves, dips and Push — is rendered on the CPU
+//! for that layer (or the whole frame) and handed over as a pre-composited image, so the GPU path
+//! is always exact with respect to the CPU reference.
+//!
+//! A Push transition is planned as ordered [`PlanStep`] operations on isolated clip inputs: each
+//! side is drawn into its own image, the two are pushed together, and the result is composited (Normal) over
+//! the canvas of the lower tracks, which is preserved for the blends above it. [`execute_cpu`]
+//! runs the same steps on the CPU and is the reference.
 
 use std::sync::Arc;
 
