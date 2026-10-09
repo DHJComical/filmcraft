@@ -20,6 +20,43 @@ pub fn level_code(level_x10: u8) -> Option<u8> {
     matches!(level_x10, 10 | 20 | 21 | 30 | 31 | 40 | 41 | 50 | 51 | 52 | 60 | 61 | 62).then(|| level_x10.saturating_mul(3))
 }
 
+/// The lowest HEVC level (× 10) whose **Main tier** limits take `width × height` pictures at `fps`
+/// and a peak bitrate (and, with the one-second VBV buffer, a CPB) of `max_kbps` (H.265 Table A.8,
+/// Main / Main 10 profiles: `MaxLumaPs`, `MaxLumaSr`, `MaxBR`, and pictures no wider or taller than
+/// `sqrt(8 × MaxLumaPs)`). `None` when no Main tier level does (the encoder then chooses).
+pub fn main_tier_level(width: u32, height: u32, fps: (u32, u32), max_kbps: u32) -> Option<u8> {
+    // (level × 10, MaxLumaPs, MaxLumaSr, Main tier MaxBR = MaxCPB in kbit/s)
+    const LEVELS: [(u8, u64, u64, u64); 13] = [
+        (10, 36_864, 552_960, 128),
+        (20, 122_880, 3_686_400, 1_500),
+        (21, 245_760, 7_372_800, 3_000),
+        (30, 552_960, 16_588_800, 6_000),
+        (31, 983_040, 33_177_600, 10_000),
+        (40, 2_228_224, 66_846_720, 12_000),
+        (41, 2_228_224, 133_693_440, 20_000),
+        (50, 8_912_896, 267_386_880, 25_000),
+        (51, 8_912_896, 534_773_760, 40_000),
+        (52, 8_912_896, 1_069_547_520, 60_000),
+        (60, 35_651_584, 1_069_547_520, 60_000),
+        (61, 35_651_584, 2_139_095_040, 120_000),
+        (62, 35_651_584, 4_278_190_080, 240_000),
+    ];
+    if fps.1 == 0 {
+        return None;
+    }
+    let ps = u64::from(width).checked_mul(u64::from(height))?;
+    // luma samples per second, rounded up
+    let sr = ps.checked_mul(u64::from(fps.0))?.div_ceil(u64::from(fps.1));
+    let side = u64::from(width.max(height));
+    LEVELS
+        .iter()
+        .find(|(_, max_ps, max_sr, max_br)| {
+            // side² ≤ 8 × MaxLumaPs: the dimension limit without a square root
+            ps <= *max_ps && sr <= *max_sr && u64::from(max_kbps) <= *max_br && side.saturating_mul(side) <= max_ps.saturating_mul(8)
+        })
+        .map(|(l, ..)| *l)
+}
+
 /// Bytes of the SPS RBSP before the general profile / tier / level record: `sps_video_parameter_set_id`,
 /// `sps_max_sub_layers_minus1` and `sps_temporal_id_nesting_flag` share the first one.
 const PTL_START: usize = 1;
@@ -115,6 +152,31 @@ mod tests {
         for bad in [0, 11, 42, 53, 70, 255] {
             assert_eq!(level_code(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn the_level_is_the_lowest_main_tier_one_that_fits() {
+        // size and sample rate alone
+        assert_eq!(main_tier_level(1280, 720, (30, 1), 5_000), Some(31));
+        assert_eq!(main_tier_level(1920, 1080, (30, 1), 8_000), Some(40));
+        // the bitrate moves 1080p30 up a level instead of to the High tier (what NVENC picked by itself)
+        assert_eq!(main_tier_level(1920, 1080, (30, 1), 18_000), Some(41));
+        assert_eq!(main_tier_level(1920, 1080, (60, 1), 12_000), Some(41));
+        assert_eq!(main_tier_level(3840, 2160, (30, 1), 22_500), Some(50));
+        assert_eq!(main_tier_level(3840, 2160, (30, 1), 60_000), Some(52));
+        assert_eq!(main_tier_level(3840, 2160, (60, 1), 60_000), Some(52));
+        assert_eq!(main_tier_level(7680, 4320, (30, 1), 60_000), Some(60));
+        // 29.97 rounds the sample rate up
+        assert_eq!(main_tier_level(1920, 1080, (30_000, 1_001), 8_000), Some(40));
+        // a long thin picture is held by the dimension limit, not the area
+        assert_eq!(main_tier_level(8192, 64, (30, 1), 1_000), Some(50));
+        // beyond every Main tier level, or nonsense: the encoder chooses
+        assert_eq!(main_tier_level(1920, 1080, (30, 1), 300_000), None);
+        assert_eq!(main_tier_level(16_384, 16_384, (30, 1), 1_000), None);
+        assert_eq!(main_tier_level(1920, 1080, (30, 0), 1_000), None);
+        assert_eq!(main_tier_level(u32::MAX, u32::MAX, (u32::MAX, 1), u32::MAX), None);
+        // every answer is a level the encoder takes
+        assert!(main_tier_level(1920, 1080, (30, 1), 18_000).and_then(level_code).is_some());
     }
 
     #[test]

@@ -284,6 +284,23 @@ fn an_encoder_dropped_mid_stream_releases_everything() {
 }
 
 #[test]
+fn high_bitrates_move_up_a_level_and_stay_in_the_main_tier() {
+    let _one = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // 1080p30 at a 12 / 18 Mbit/s peak: above level 4's Main tier (12), where NVENC's own choice was
+    // level 4 High tier, which many hardware decoders refuse
+    for (w, h, fps, kbps, max_kbps, level_idc) in
+        [(1920u32, 1080u32, 30u32, 12_000u32, 18_000u32, 123u8), (1920, 1080, 30, 4_000, 6_000, 120), (1280, 720, 30, 5_000, 7_500, 93)]
+    {
+        let cfg = Config { fps: (fps, 1), bitrate_kbps: kbps, max_bitrate_kbps: max_kbps, keyint: 30, ..config(w, h) };
+        let Some((enc, packets, _)) = encode_all(&cfg, 4) else { return };
+        assert_eq!(packets.len(), 4);
+        let record = enc.hevc_config().expect("an hvcC record");
+        assert!(!record.general_tier_flag, "{w}x{h} at {max_kbps} kbit/s: Main tier");
+        assert_eq!(record.general_level_idc, level_idc, "{w}x{h} at {max_kbps} kbit/s");
+    }
+}
+
+#[test]
 fn a_keyframe_every_one_or_two_pictures_is_written_without_b_frames() {
     let _one = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // NVENC wants a GOP longer than the B-frame pattern: short GOPs drop the B-frames, they do not fail

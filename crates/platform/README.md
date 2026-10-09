@@ -142,8 +142,10 @@ level and flags are the encoder's own. If it is missing the export stops with th
 One codec enum (`nvenc::Codec`, chosen by `Profile::HevcMain` the way `VtProfile::HevcMain` does it
 for VideoToolbox) parameterises the NVENC session: the codec and profile GUIDs, the capability
 query, the `hevcConfig` member of the codec-configuration union, how NAL units are told apart
-(`(b0 >> 1) & 0x3f`) and the level numbering (`level × 30`, so 4.1 is 123; the export leaves the
-level to the encoder). The H.264 path is unchanged: the same export is the same file, byte for byte.
+(`(b0 >> 1) & 0x3f`) and the level numbering (`level × 30`, so 4.1 is 123). The level is the lowest
+whose **Main tier** limits hold the picture size, sample rate and peak bitrate (H.265 Table A.8,
+`nvenc::hevc::main_tier_level`): left to choose, NVENC answered 1080p30 at an 18 Mbit/s peak with
+level 4 High tier, which many hardware decoders refuse; it is now level 4.1 Main tier. The H.264 path is unchanged: the same export is the same file, byte for byte.
 
 - **Choosing the format is the opt-in,** as on macOS: Export ▸ Format ▸ H.265 (HEVC) or
   `"format": "hevc"`. `register()` hands `nvenc::hevc_available` to

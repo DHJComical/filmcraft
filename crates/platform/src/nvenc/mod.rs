@@ -181,6 +181,12 @@ impl Nvenc {
         let codec = cfg.profile.codec();
         let level = match (codec, cfg.level) {
             (Codec::Hevc, Some(l)) => Some(hevc::level_code(l).ok_or_else(|| format!("{}.{} is not an HEVC level", l / 10, l % 10))?),
+            // left to itself NVENC answers a bitrate above its chosen level's Main tier limit with the
+            // High tier, which many hardware decoders refuse: pick the lowest Main tier level instead
+            (Codec::Hevc, None) => {
+                let max_kbps = if cfg.cbr { cfg.bitrate_kbps } else { cfg.max_bitrate_kbps.max(cfg.bitrate_kbps) };
+                hevc::main_tier_level(w, h, cfg.fps, max_kbps).and_then(hevc::level_code)
+            }
             (_, l) => l,
         };
         let mut session = Session::open()?;
