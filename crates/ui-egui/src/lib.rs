@@ -1235,10 +1235,12 @@ impl FilmcraftApp {
         let t = self.tokens;
         let full = ui.max_rect();
         ui.painter().rect_filled(full, 0.0, t.app_bg);
-        let header_h = 38.0;
+        let header_h = if self.ui.show_header { 38.0 } else { 0.0 };
         let header = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), header_h));
-        header::show(self, ui, header);
-        let status_h = 20.0;
+        if self.ui.show_header {
+            header::show(self, ui, header);
+        }
+        let status_h = if self.ui.show_status_bar { 20.0 } else { 0.0 };
         let body = egui::Rect::from_min_max(egui::pos2(full.min.x + 1.0, header.max.y + 1.0), egui::pos2(full.max.x - 1.0, full.max.y - status_h - 2.0));
         match self.ui.mode {
             state::Mode::Edit => self.dock_area(ui, body),
@@ -1246,6 +1248,11 @@ impl FilmcraftApp {
             state::Mode::Export => panels::export_mode::show(self, ui, body),
         }
         panels::dialogs::show(self, &ctx);
+        if !self.ui.show_status_bar {
+            // no bar to draw the job in, but a finished preview render still plays
+            self.watch_jobs(ui.ctx());
+            return;
+        }
         // Status / hint bar
         let sb = egui::Rect::from_min_max(egui::pos2(full.min.x, full.max.y - status_h), full.max);
         ui.painter().rect_filled(sb, 0.0, egui::Color32::from_rgb(0x1c, 0x1c, 0x1c));
@@ -1268,9 +1275,9 @@ impl FilmcraftApp {
         self.job_status(ui, sb, &t);
     }
 
-    /// Right side of the status bar: the running job (export / render previews) with a progress
-    /// bar and a cancel button; plays the rendered range when a preview render completes.
-    fn job_status(&mut self, ui: &mut egui::Ui, sb: egui::Rect, t: &Tokens) {
+    /// The running job (export / render previews), if any; plays the rendered range when a preview
+    /// render completes. Runs every frame, with or without the status bar.
+    fn watch_jobs(&mut self, ctx: &egui::Context) -> Option<filmcraft_engine::Job> {
         use std::sync::atomic::Ordering;
         let running = self.session.jobs.iter().rev().find(|j| !j.progress.finished.load(Ordering::Relaxed)).cloned();
         // Play after rendering previews.
@@ -1285,12 +1292,20 @@ impl FilmcraftApp {
                 self.play(1.0);
             }
         }
-        let Some(job) = running else { return };
+        let job = running?;
         if job.label.starts_with("Rendering ") && !job.label.contains("audio") && self.watched_render.is_none_or(|w| w.0 != job.id) {
             let from = self.session.active_sequence().and_then(|q| q.mark_in).unwrap_or(Tick::ZERO);
             self.watched_render = Some((job.id, from));
         }
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(150));
+        ctx.request_repaint_after(std::time::Duration::from_millis(150));
+        Some(job)
+    }
+
+    /// Right side of the status bar: the running job (export / render previews) with a progress
+    /// bar and a cancel button.
+    fn job_status(&mut self, ui: &mut egui::Ui, sb: egui::Rect, t: &Tokens) {
+        use std::sync::atomic::Ordering;
+        let Some(job) = self.watch_jobs(ui.ctx()) else { return };
         let f = job.progress.fraction().clamp(0.0, 1.0);
         let left = job.progress.eta().map(panels::left_text).unwrap_or_default();
         let cancel = egui::Rect::from_center_size(egui::pos2(sb.max.x - 14.0, sb.center().y), egui::vec2(14.0, 14.0));
