@@ -1105,3 +1105,5 @@ mod trim_tests;
 mod vfx_tests;
 #[cfg(test)]
 mod voiceover_tests;
+#[cfg(test)]
+mod wasm_clock_tests;
