@@ -1681,6 +1681,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "rfd",
  "serde_json",
+ "sys-locale",
  "winit",
  "winresource",
 ]
@@ -1816,6 +1817,7 @@ dependencies = [
  "filmcraft-vp9",
  "image",
  "log",
+ "serde_json",
  "symphonia",
  "thiserror 2.0.21",
  "web-time",
@@ -1843,6 +1845,7 @@ dependencies = [
 name = "filmcraft-edit"
 version = "0.4.0"
 dependencies = [
+ "filmcraft-geom",
  "filmcraft-media",
  "filmcraft-project",
  "filmcraft-time",
@@ -2097,10 +2100,13 @@ dependencies = [
 name = "filmcraft-platform"
 version = "0.4.0"
 dependencies = [
+ "filmcraft-bitstream",
  "filmcraft-codecs",
  "filmcraft-color",
  "filmcraft-export",
  "filmcraft-frame",
+ "filmcraft-h264",
+ "filmcraft-hevc",
  "filmcraft-isobmff",
  "filmcraft-media",
  "filmcraft-project",
@@ -2203,6 +2209,7 @@ dependencies = [
  "skrifa",
  "unicode-bidi",
  "unicode-linebreak",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -5781,6 +5788,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "sys-locale"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

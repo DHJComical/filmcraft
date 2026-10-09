@@ -3,7 +3,9 @@
 //! Frames come from the background [`FrameServer`](crate::frames::FrameServer) at the *smaller* of
 //! the playback resolution and the on-screen resolution (so a small monitor never pays for 4K).
 //! While playing we prefetch the next frames in priority order; while scrubbing the exact frame is
-//! requested first and the nearest cached frame is shown until it arrives (no black flashes).
+//! requested first and the nearest cached frame is shown until it arrives (no black flashes), or
+//! failing that the frame asked for a refresh earlier, so the picture follows a scrub or a value
+//! that is dragged instead of waiting for the mouse to rest.
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use filmcraft_project::ItemKind;
@@ -33,12 +35,12 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     let (target, frame_size, rate, time, duration, drop_frame, mark_in, mark_out, name) = match which {
         Which::Program => {
             let Some(seq_id) = app.session.state.active_sequence else {
-                crate::dock::placeholder(ui, rect, &t, "(no sequences)");
+                crate::dock::placeholder(ui, rect, &t, tl!("(no sequences)"));
                 return;
             };
             // A damaged project can name an active sequence that no longer exists.
             let Some(q) = app.session.active_sequence() else {
-                crate::dock::placeholder(ui, rect, &t, "(no sequences)");
+                crate::dock::placeholder(ui, rect, &t, tl!("(no sequences)"));
                 return;
             };
             (
@@ -55,7 +57,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
         }
         Which::Source => {
             let Some(item) = app.session.state.source_item else {
-                crate::dock::placeholder(ui, rect, &t, "(no clips)");
+                crate::dock::placeholder(ui, rect, &t, tl!("(no clips)"));
                 return;
             };
             let Some(pi) = app.session.project.item(item) else { return };
@@ -175,18 +177,26 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
         } else {
             app.frames.request(key, rate.tick_of(frame), scale, &project, 0);
         }
+        let asked = asked_before(app, prefix, key, playing);
         let tex_name = if channel { format!("monitor-{prefix}-{display:?}") } else { format!("monitor-{prefix}") };
-        let (shown, exact) = if use_gpu {
-            let exact = app.frames.get_plan(&key).map(|p| (key, p));
-            let is_exact = exact.is_some();
-            let tex = match exact.or_else(|| app.frames.nearest_plan(key, 6)) {
-                Some((k, plan)) => app.gpu_present(k, &plan).map(|(id, _)| id),
-                None => app.gpu.as_ref().and_then(|g| g.texture),
-            };
-            (tex, is_exact)
+        let (shown, on_screen) = if use_gpu {
+            let found = app
+                .frames
+                .get_plan(&key)
+                .map(|p| (key, p))
+                .or_else(|| app.frames.nearest_plan(key, 6))
+                .or_else(|| asked.iter().find_map(|k| app.frames.get_plan(k).map(|p| (*k, p))));
+            match found {
+                Some((k, plan)) => (app.gpu_present(k, &plan).map(|(id, _)| id), Some(k)),
+                None => (app.gpu.as_ref().and_then(|g| g.texture), app.gpu.as_ref().and_then(|g| g.last_key)),
+            }
         } else {
-            cpu_texture(app, &ctx, &tex_name, key, display)
+            cpu_texture(app, &ctx, &tex_name, key, &asked, display)
         };
+        let exact = on_screen == Some(key);
+        if which == Which::Program {
+            app.program_shown = on_screen;
+        }
         if !playing && !exact {
             app.monitor_inexact = true;
         }
@@ -207,7 +217,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
             app.frames.request(rkey, rate.tick_of(rf), scale, &project, 1);
             let rpic = fit(ra, frame_size.0 as f32, frame_size.1 as f32);
             ui.painter().rect_filled(rpic, 0.0, t.monitor_bg);
-            if let (Some(tex), _) = cpu_texture(app, &ctx, &format!("monitor-{prefix}-ref"), rkey, DisplayMode::Composite) {
+            if let (Some(tex), _) = cpu_texture(app, &ctx, &format!("monitor-{prefix}-ref"), rkey, &[], DisplayMode::Composite) {
                 ui.painter().image(tex, rpic, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
             }
             app.auto.add("program.compare.reference", rpic, "reference frame");
@@ -224,7 +234,16 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
             ui.painter().line_segment([c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)], Stroke::new(1.0, Color32::from_white_alpha(120)));
         }
         if display != DisplayMode::Composite && !compare {
-            let label = format!("{display:?}");
+            let label = match display {
+                DisplayMode::Composite => tl!("Composite"),
+                DisplayMode::Alpha => tl!("Alpha"),
+                DisplayMode::Red => tl!("Red"),
+                DisplayMode::Green => tl!("Green"),
+                DisplayMode::Blue => tl!("Blue"),
+                DisplayMode::AudioWaveform => tl!("Audio Waveform"),
+                DisplayMode::Comparison => tl!("Comparison"),
+                DisplayMode::VideoAndWaveform => tl!("Video and Waveform"),
+            };
             ui.painter().text(pos2(video_area.max.x - 8.0, video_area.min.y + 6.0), Align2::RIGHT_TOP, label, Tokens::ui(10.0), t.text_dim);
         }
     }
@@ -271,7 +290,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     // zoom + resolution dropdowns centred-ish
     let zr = Rect::from_min_size(pos2(row1.min.x + 116.0, row1.min.y), vec2(70.0, 24.0));
     let zoom_label = match mv.zoom {
-        None => "Fit".to_string(),
+        None => tl!("Fit").to_string(),
         Some(z) => format!("{}%", (z * 100.0).round() as i32),
     };
     let zresp = crate::widgets::dropdown_text(ui, zr, &zoom_label, &t, egui::Id::new((prefix, "zoom")));
@@ -279,11 +298,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     monitor_view::zoom_menu(app, &zresp, which);
     let res = mv.res;
     let rr = Rect::from_min_size(pos2(row1.max.x - 196.0, row1.min.y), vec2(62.0, 24.0));
-    let rresp = crate::widgets::dropdown_text(ui, rr, res.label(), &t, egui::Id::new((prefix, "res")));
+    let rresp = crate::widgets::dropdown_text(ui, rr, crate::i18n::t(res.label()), &t, egui::Id::new((prefix, "res")));
     app.auto.add(&format!("{prefix}.resolution"), rr, "Select Playback Resolution");
     egui::Popup::menu(&rresp).show(|ui| {
         for r in PlaybackRes::ALL {
-            if ui.selectable_label(r == res, r.label()).clicked() {
+            if ui.selectable_label(r == res, crate::i18n::t(r.label())).clicked() {
                 monitor_view::view_mut(app, which).res = r;
             }
         }
@@ -296,38 +315,38 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
         ui.set_min_width(240.0);
         monitor_view::wrench_items(app, ui, which);
         let mv = monitor_view::view_mut(app, which);
-        ui.checkbox(&mut mv.safe_margins, "Safe Margins");
-        ui.checkbox(&mut mv.show_transport, "Show Transport Controls");
+        ui.checkbox(&mut mv.safe_margins, tl!("Safe Margins"));
+        ui.checkbox(&mut mv.show_transport, tl!("Show Transport Controls"));
         if which == Which::Program {
             ui.separator();
-            ui.checkbox(&mut app.ui.show_scopes, "Lumetri Scopes");
-            ui.checkbox(&mut app.playback.looping, "Loop");
+            ui.checkbox(&mut app.ui.show_scopes, tl!("Lumetri Scopes"));
+            ui.checkbox(&mut app.playback.looping, tl!("Loop"));
             ui.separator();
             let mut follows = app.session.state.multicam_audio_follows_video;
-            if ui.checkbox(&mut follows, "Multi-Camera Audio Follows Video").changed() {
+            if ui.checkbox(&mut follows, tl!("Multi-Camera Audio Follows Video")).changed() {
                 let _ = app.session.execute("multicam.audioFollowsVideo", json!({"enabled": follows}));
             }
-            ui.checkbox(&mut app.ui.multicam_record, "Multi-Camera Record");
+            ui.checkbox(&mut app.ui.multicam_record, tl!("Multi-Camera Record"));
             let v = app.session.state.multicam_view.clone();
             for (cmd, label, on) in [
-                ("multicam.selectionTopDown", "Multi-Camera Selection Top Down", v.top_down),
-                ("multicam.showPreviewMonitor", "Show Multi-Camera Preview Monitor", v.show_preview),
-                ("multicam.autoAdjustQuality", "Auto-Adjust Multi-Camera Playback Quality", v.auto_quality),
-                ("multicam.transmitView", "Transmit Multi-Camera View", v.transmit),
+                ("multicam.selectionTopDown", tl!("Multi-Camera Selection Top Down"), v.top_down),
+                ("multicam.showPreviewMonitor", tl!("Show Multi-Camera Preview Monitor"), v.show_preview),
+                ("multicam.autoAdjustQuality", tl!("Auto-Adjust Multi-Camera Playback Quality"), v.auto_quality),
+                ("multicam.transmitView", tl!("Transmit Multi-Camera View"), v.transmit),
             ] {
                 let mut b = on;
                 if ui.checkbox(&mut b, label).changed() {
                     let _ = app.session.execute(cmd, json!({"enabled": b}));
                 }
             }
-            ui.menu_button("Multi-Camera Layout", |ui| {
-                for (k, label) in [("auto", "Automatic"), ("2x2", "2 × 2"), ("3x3", "3 × 3"), ("4x4", "4 × 4")] {
+            ui.menu_button(tl!("Multi-Camera Layout"), |ui| {
+                for (k, label) in [("auto", tl!("Automatic")), ("2x2", "2 × 2"), ("3x3", "3 × 3"), ("4x4", "4 × 4")] {
                     if ui.selectable_label(v.layout_name() == k, label).clicked() {
                         let _ = app.session.execute("multicam.gridLayout", json!({"layout": k}));
                     }
                 }
             });
-            if ui.button("Edit Cameras…").clicked() {
+            if ui.button(tl!("Edit Cameras…")).clicked() {
                 let _ = crate::panels::multicam::route(app, "multicam.editCamerasDialog", &json!({}));
                 ui.close();
             }
@@ -342,20 +361,63 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     transport(app, ui, row3, which);
 }
 
-/// A monitor texture from the CPU frame path: the exact frame, else the nearest cached one, with
-/// the display mode's channel mapping. Returns (texture, exact).
-fn cpu_texture(app: &mut FilmcraftApp, ctx: &egui::Context, name: &str, key: FrameKey, mode: DisplayMode) -> (Option<egui::TextureId>, bool) {
-    let upload = |app: &mut FilmcraftApp, k: FrameKey, img: &crate::frames::Rgba| {
-        if mode.is_channel() { app.texture_for_mapped(ctx, name, k, img, |i| monitor_view::channel_view(i, mode)) } else { app.texture_for(ctx, name, k, img) }
-    };
-    if let Some(img) = app.frames.get(&key) {
-        return (Some(upload(app, key, &img)), true);
+/// How many of a paused monitor's latest requests are remembered ([`asked_before`]): about a
+/// second of refreshes, so a frame that took several refreshes to render is still known when it
+/// is ready.
+const ASKED_KEYS: usize = 64;
+
+/// Note that the monitor `prefix` asks for `key`, and return the frames it asked for on the passes
+/// before, newest first: the stand-ins for `key` while it renders.
+///
+/// A value that is dragged asks for a new revision on every pass, and a scrub for a new frame, so
+/// the frame asked for is never the one that is ready; the one asked for a pass earlier usually
+/// is, and showing it keeps the picture one pass behind the mouse instead of frozen until the
+/// mouse rests. Playback has its own schedule and remembers nothing (what was on screen before
+/// Play is no stand-in for where it stopped).
+fn asked_before(app: &mut FilmcraftApp, prefix: &str, key: FrameKey, playing: bool) -> Vec<FrameKey> {
+    let asked = app.monitor_asked.entry(prefix.to_string()).or_default();
+    if playing {
+        asked.clear();
+        return Vec::new();
     }
-    let tex = match app.frames.nearest(key.target, key.frame, key.size, key.revision, 6) {
-        Some(img) => Some(upload(app, FrameKey { frame: key.frame - 1, ..key }, &img)),
-        None => app.texture_existing(name).map(|(id, _)| id),
-    };
-    (tex, false)
+    // another sequence or clip: its pictures are not this one's
+    asked.retain(|k| k.target == key.target && *k != key);
+    let before: Vec<FrameKey> = asked.iter().rev().copied().collect();
+    asked.push_back(key);
+    while asked.len() > ASKED_KEYS {
+        asked.pop_front();
+    }
+    before
+}
+
+/// A monitor texture from the CPU frame path: the exact frame, else the nearest cached one before
+/// it, else the newest ready one of `asked` (see [`asked_before`]), with the display mode's
+/// channel mapping. Returns the texture and the frame it shows.
+fn cpu_texture(
+    app: &mut FilmcraftApp,
+    ctx: &egui::Context,
+    name: &str,
+    key: FrameKey,
+    asked: &[FrameKey],
+    mode: DisplayMode,
+) -> (Option<egui::TextureId>, Option<FrameKey>) {
+    let found = app
+        .frames
+        .get(&key)
+        .map(|img| (key, img))
+        .or_else(|| (1..=6).map(|d| FrameKey { frame: key.frame.saturating_sub(d), ..key }).find_map(|k| app.frames.get(&k).map(|img| (k, img))))
+        .or_else(|| asked.iter().find_map(|k| app.frames.get(k).map(|img| (*k, img))));
+    match found {
+        Some((k, img)) => {
+            let tex = if mode.is_channel() {
+                app.texture_for_mapped(ctx, name, k, &img, |i| monitor_view::channel_view(i, mode))
+            } else {
+                app.texture_for(ctx, name, k, &img)
+            };
+            (Some(tex), Some(k))
+        }
+        None => (app.texture_existing(name).map(|(id, _)| id), app.texture_key(name)),
+    }
 }
 
 pub fn quantize_scale(s: f32) -> f32 {
@@ -450,33 +512,33 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
     let src = which == Which::Source;
     let buttons: Vec<(Icon, &str, &str)> = if src {
         vec![
-            (Icon::Marker, "markers.add", "Add Marker (M)"),
-            (Icon::MarkIn, "src.markIn", "Mark In (I)"),
-            (Icon::MarkOut, "src.markOut", "Mark Out (O)"),
-            (Icon::GoToIn, "src.goIn", "Go to In (Shift+I)"),
-            (Icon::StepBack, "src.stepBack", "Step Back 1 Frame (Left)"),
-            (Icon::Play, "src.play", "Play-Stop Toggle (Space)"),
-            (Icon::StepFwd, "src.stepFwd", "Step Forward 1 Frame (Right)"),
-            (Icon::GoToOut, "src.goOut", "Go to Out (Shift+O)"),
-            (Icon::Insert, "source.insert", "Insert (,)"),
-            (Icon::Overwrite, "source.overwrite", "Overwrite (.)"),
-            (Icon::Camera, "exportFrame", "Export Frame (Shift+E)"),
-            (Icon::Proxy, "media.toggleProxies", "Toggle Proxies"),
+            (Icon::Marker, "markers.add", tl!("Add Marker (M)")),
+            (Icon::MarkIn, "src.markIn", tl!("Mark In (I)")),
+            (Icon::MarkOut, "src.markOut", tl!("Mark Out (O)")),
+            (Icon::GoToIn, "src.goIn", tl!("Go to In (Shift+I)")),
+            (Icon::StepBack, "src.stepBack", tl!("Step Back 1 Frame (Left)")),
+            (Icon::Play, "src.play", tl!("Play-Stop Toggle (Space)")),
+            (Icon::StepFwd, "src.stepFwd", tl!("Step Forward 1 Frame (Right)")),
+            (Icon::GoToOut, "src.goOut", tl!("Go to Out (Shift+O)")),
+            (Icon::Insert, "source.insert", tl!("Insert (,)")),
+            (Icon::Overwrite, "source.overwrite", tl!("Overwrite (.)")),
+            (Icon::Camera, "exportFrame", tl!("Export Frame (Shift+E)")),
+            (Icon::Proxy, "media.toggleProxies", tl!("Toggle Proxies")),
         ]
     } else {
         vec![
-            (Icon::Marker, "markers.add", "Add Marker (M)"),
-            (Icon::MarkIn, "markers.markIn", "Mark In (I)"),
-            (Icon::MarkOut, "markers.markOut", "Mark Out (O)"),
-            (Icon::GoToIn, "markers.goToIn", "Go to In (Shift+I)"),
-            (Icon::StepBack, "playhead.stepBack", "Step Back 1 Frame (Left)"),
-            (if app.playback.playing { Icon::Pause } else { Icon::Play }, "playback.toggle", "Play-Stop Toggle (Space)"),
-            (Icon::StepFwd, "playhead.stepForward", "Step Forward 1 Frame (Right)"),
-            (Icon::GoToOut, "markers.goToOut", "Go to Out (Shift+O)"),
-            (Icon::Lift, "sequence.lift", "Lift (;)"),
-            (Icon::Extract, "sequence.extract", "Extract (')"),
-            (Icon::Camera, "exportFrame", "Export Frame (Shift+E)"),
-            (Icon::Proxy, "media.toggleProxies", "Toggle Proxies"),
+            (Icon::Marker, "markers.add", tl!("Add Marker (M)")),
+            (Icon::MarkIn, "markers.markIn", tl!("Mark In (I)")),
+            (Icon::MarkOut, "markers.markOut", tl!("Mark Out (O)")),
+            (Icon::GoToIn, "markers.goToIn", tl!("Go to In (Shift+I)")),
+            (Icon::StepBack, "playhead.stepBack", tl!("Step Back 1 Frame (Left)")),
+            (if app.playback.playing { Icon::Pause } else { Icon::Play }, "playback.toggle", tl!("Play-Stop Toggle (Space)")),
+            (Icon::StepFwd, "playhead.stepForward", tl!("Step Forward 1 Frame (Right)")),
+            (Icon::GoToOut, "markers.goToOut", tl!("Go to Out (Shift+O)")),
+            (Icon::Lift, "sequence.lift", tl!("Lift (;)")),
+            (Icon::Extract, "sequence.extract", tl!("Extract (')")),
+            (Icon::Camera, "exportFrame", tl!("Export Frame (Shift+E)")),
+            (Icon::Proxy, "media.toggleProxies", tl!("Toggle Proxies")),
         ]
     };
     let bw = 30.0;
@@ -512,7 +574,7 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
                 }
                 "src.play" => Ok(serde_json::Value::Null),
                 "exportFrame" => {
-                    app.ui.status = "Export Frame: use Export mode (M6)".into();
+                    app.ui.status = tl!("Export Frame: use Export mode (M6)").into();
                     Ok(serde_json::Value::Null)
                 }
                 c => crate::menus::invoke(app, &ctx, c, json!({})),
@@ -525,7 +587,7 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
     }
     // button editor "+"
     let r = Rect::from_min_size(pos2(row.max.x - 30.0, row.min.y + 4.0), vec2(22.0, 22.0));
-    let resp = ui.interact(r, egui::Id::new((prefix, "btn-editor")), Sense::click()).on_hover_text("Button Editor");
+    let resp = ui.interact(r, egui::Id::new((prefix, "btn-editor")), Sense::click()).on_hover_text(tl!("Button Editor"));
     icons::paint(ui.painter(), r.shrink(5.0), Icon::Plus, if resp.hovered() { t.tab_text_active } else { t.text_dim });
 }
 
