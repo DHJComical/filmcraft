@@ -23,6 +23,7 @@ mod pcm;
 mod pipeline;
 pub mod presets;
 pub mod settings;
+pub mod still;
 pub use audio_out::LoudnessReport;
 pub use job::{Exporter, Step, stepped};
 pub use mxf_out::opatom_audio_paths;
