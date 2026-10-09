@@ -1401,8 +1401,10 @@ impl FilmcraftApp {
 
     /// Contextual hint for the status bar (Premiere shows tool/gesture hints here).
     fn hint_text(&self) -> String {
+        let mac = cfg!(target_os = "macos");
         match self.ui.tool {
-            state::Tool::Selection => "Click to select, or click in empty space and drag to marquee select. Use Shift, Opt, and Cmd for other options.",
+            state::Tool::Selection if mac => "Click to select, or click in empty space and drag to marquee select. Use Shift, Opt, and Cmd for other options.",
+            state::Tool::Selection => "Click to select, or click in empty space and drag to marquee select. Use Shift, Alt, and Ctrl for other options.",
             state::Tool::TrackSelectForward => "Click to select all clips to the right in all tracks. Shift-click for a single track.",
             state::Tool::TrackSelectBackward => "Click to select all clips to the left in all tracks. Shift-click for a single track.",
             state::Tool::Ripple => "Drag an edit point to ripple trim; later clips move to keep the gap closed.",
@@ -1413,7 +1415,8 @@ impl FilmcraftApp {
             state::Tool::Slip => "Drag a clip to slip its source in/out without moving it.",
             state::Tool::Slide => "Drag a clip to slide it between its neighbours.",
             state::Tool::Hand => "Drag to scroll the timeline.",
-            state::Tool::Zoom => "Click to zoom in; Opt-click to zoom out.",
+            state::Tool::Zoom if mac => "Click to zoom in; Opt-click to zoom out.",
+            state::Tool::Zoom => "Click to zoom in; Alt-click to zoom out.",
             _ => "",
         }
         .to_string()
