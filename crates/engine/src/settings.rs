@@ -1084,10 +1084,8 @@ pub fn sanitize(v: &mut Value, defaults: &Value) {
         let Some(slot) = path.iter().try_fold(&mut *v, |v, k| v.get_mut(*k)) else { continue };
         let def = path.iter().try_fold(defaults, |v, k| v.get(*k)).cloned().unwrap_or(Value::Null);
         match f.kind {
-            Kind::Choice(_) | Kind::Color => {
-                if validate(f.key, slot).is_err() {
-                    *slot = def;
-                }
+            Kind::Choice(_) | Kind::Color if validate(f.key, slot).is_err() => {
+                *slot = def;
             }
             Kind::Int { min, max, .. } => match slot.as_f64().filter(|x| x.is_finite()) {
                 Some(x) => *slot = json!(x.round().clamp(min, max) as u64),
