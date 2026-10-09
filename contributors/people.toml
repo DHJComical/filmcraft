@@ -26,3 +26,13 @@ sync_github_name = false
 real_name = "Gert Pellin"
 display_name = "Gert Pellin"
 sync_github_name = false
+
+[people.swillunderscore]
+display_name = "Swill Software"
+
+
+[people.IppSec]
+sync_github_name = true
+
+[people.ItzBloxy]
+display_name = "Bloxy"
