@@ -13,7 +13,8 @@
 //! - `ui.click {id | x,y, button?, count?, modifiers?}` / `ui.move {x,y}` / `ui.scroll {x,y,dx,dy}`
 //! - `ui.drag {from:{id|x,y}, to:{id|x,y}, steps?, modifiers?}`: synthetic press-move-release
 //! - `ui.key {key, command?, shift?, alt?, ctrl?}` / `ui.type {text}`
-//! - `ui.timeline.hit {x, y}`: what the timeline shows at a point (track, clip, edge, time)
+//! - `ui.timeline.hit {x, y, modifiers?}`: what the timeline shows at a point (track, clip, edge,
+//!   time) and `kind`, the trim a press of the current tool with `modifiers` starts there
 //! - `ui.timeline.locate {clip, edge?}`: screen point of a clip body/edge (for drags)
 //! - `ui.playback {action: play|stop|toggle, speed?}`
 //! - `ui.screenshot {path?, panel?}`: PNG of the window (or one panel)
@@ -350,7 +351,7 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
                 Ok(p) => p,
                 Err(e) => return err(e),
             };
-            ok(crate::panels::timeline::hit_json(app, pos))
+            ok(crate::panels::timeline::hit_json(app, pos, modifiers(p)))
         }
         "ui.timeline.locate" => {
             let Some(c) = p.get("clip").and_then(Value::as_u64) else { return err("need `clip`") };

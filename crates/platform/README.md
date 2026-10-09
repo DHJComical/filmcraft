@@ -8,7 +8,7 @@ It is the one crate of the workspace allowed to contain `unsafe`, under the rule
 
 ```rust
 // at startup (the desktop app, filmcraft-cli, the bench)
-let availability = filmcraft_platform::register(); // Available("VideoToolbox") on macOS, Available("Media Foundation") on Windows
+let availability = filmcraft_platform::register(); // Available("VideoToolbox") on macOS, Available("Media Foundation") on Windows, Available("VA-API") on Linux with a driver
 ```
 
 ## What it does
@@ -70,6 +70,37 @@ let availability = filmcraft_platform::register(); // Available("VideoToolbox") 
   It declines two-pass VBR, HDR, MXF, interlaced output, sizes outside NVENC's limits and systems
   without an NVIDIA GPU or driver, and the software encoder runs instead. A failure during an export
   ends it with an error, since a hardware stream cannot be finished in software.
+- **Linux: VA-API, H.264 (`avcC`) and HEVC (`hvcC`)**: H.264 8-bit 4:2:0 progressive, Constrained
+  Baseline / Main / High; HEVC Main, Main 10 and Main Still Picture, 4:2:0 8- and 10-bit (`vaapi/`), on Intel (iHD, i965), AMD and other Mesa drivers. `libva.so.2` and `libva-drm.so.2`
+  are loaded at run time (`vaapi/va.rs`; no libva headers needed to build), and each decoder opens
+  its own display on the first DRM render node (`/dev/dri/renderD128`…) with a working driver.
+  VA-API decoding is *stateless*: the host parses the stream and keeps the decoded picture buffer,
+  and the GPU decodes one picture's slice data at a time into a surface. That host side
+  (`vaapi/h264.rs`, `vaapi/hevc.rs`, safe code) is the software decoders' own: their parameter-set
+  and slice-header parsers, POC computation and DPBs (`filmcraft_h264::dpb`, `filmcraft_hevc::dpb`,
+  generic over what a picture is: H.264 reference marking including MMCOs and reference lists with
+  modifications; HEVC reference picture sets and lists, RASL pictures of a CRA the run starts at
+  left out; output order). The two decoders therefore make
+  the same decisions and output the same pictures in the same order, and the parity tests are
+  bit-exact. Each picture is sent as one picture-parameter buffer, the scaling matrices, and a slice
+  parameter + slice data buffer per slice (the NAL unit as stored, emulation prevention included).
+  HEVC pictures are sent the same way per slice segment (scaling lists only when enabled, converted
+  to raster order). Pictures the DPB outputs are read back right away (`vaGetImage` into an NV12 or
+  P010 image, then `biplanar.rs`), **the one GPU to CPU copy**. Surfaces: the stream's DPB size plus two.
+  - *frame_num gaps* (and every start at a non-IDR picture: an open-GOP seek) get "non-existing"
+    frames like the software decoder's: copies of the latest decoded frame, mid-gray when there is
+    none (`vaPutImage`). Pictures predicted from them (the leading pictures of an open GOP after a
+    seek) are concealment in both decoders and can differ: the hardware also reads motion data the
+    stand-ins do not have. Everything from the seek point on is bit-exact.
+  - *Declined up front* (our decoder is used): VP9 and AV1 (not through VA-API yet), H.264 profiles
+    other than Baseline / Main / High, 10-bit H.264, HEVC range extensions and profiles other than
+    Main / Main 10 / Main Still Picture, 4:2:2 / 4:4:4, field / MBAFF coding, no libva, no render
+    node or driver, a profile or size the driver does not decode. *Mid-stream errors*
+    (`HybridDecoder` continues in software): FMO, SP / SI slices, data partitioning, a size or DPB
+    change, a missing reference picture (HEVC: one the RPS names that was never decoded), more than
+    15 HEVC reference frames, any driver error.
+  - An HEVC `flush` ends the stream as in software (references are dropped and the next CRA
+    leaves out its RASL pictures); the GOP cache always seeks after a flush.
 - **Other systems:** `register()` does nothing and returns `Availability::Unavailable`.
 - **`HybridDecoder`** (`hybrid.rs`, safe code): the hardware decoder plus the means to build our
   software decoder for the same `SampleEntry` (`filmcraft_codecs::software_video_decoder`). On a
@@ -114,8 +145,10 @@ built-in encoder, which changes three things from H.264:
 - **Choosing the format is the opt-in.** No `hardware_encoding` setting: Export ▸ Format ▸ H.265
   (HEVC), or `"format": "hevc"` in `file.exportMedia` (`h265` is accepted too). The format is
   listed as available only on a machine with a hardware HEVC encoder: `register()` hands
-  `hardware_encode::hevc_available` (one small hardware session, created on the first question) to
-  `filmcraft_export::register_format_probe`.
+  `hardware_encode::hevc_available` (one small hardware session, about 0.1 s) to
+  `filmcraft_export::register_format_probe`, and asks it right away on a thread of its own
+  (`warm_hevc_probe`), so the first draw of the format list does not create the session on the UI
+  thread.
 - **There is no fallback encoder.** What the hardware path does not take is an error, not a
   different encoder: two-pass VBR is refused up front (`ExportSettings::validate`), HDR sequences
   are exported as SDR (the H.265 path is 8-bit), and odd sizes, non-square pixels or a machine
@@ -140,13 +173,14 @@ level and flags are the encoder's own. If it is missing the export stops with th
 - **Never undecodable:** the factory declines (returns `None`, so the software decoder is used)
   when Settings ▸ Playback ▸ Hardware decoding is Off, for formats it does not take (field-coded
   H.264, bit depths other than 8 / 10, 4:4:4 or monochrome, luma / chroma depth mismatch, larger
-  than 8192×8192; on Windows also 4:2:2 and the profiles listed above) and when the OS cannot
-  create a hardware session (VideoToolbox) or a GPU-backed decoder (Media Foundation).
+  than 8192×8192; on Windows also 4:2:2 and the profiles listed above; on Linux everything but
+  8-bit 4:2:0 progressive H.264 and 4:2:0 HEVC Main / Main 10) and when the OS cannot create a hardware session (VideoToolbox), a
+  GPU-backed decoder (Media Foundation) or a VA-API configuration and context (Linux).
 - **Interchangeable:** colour, pixel aspect, pts, presentation order, `is_random_access` and
   `is_disposable` come from the software decoders' own helpers (`filmcraft_codecs::hw`,
   `video::vui_color`, `sar_par`).
-- **Never crash:** no `unwrap` / `expect` / `panic!` outside tests; the output callback runs under
-  `catch_unwind`; every `unsafe` block has a `// SAFETY:` comment; the public API is safe.
+- **Never crash:** no `unwrap` / `expect` / `panic!` outside tests; the output callback (and
+  libva's error-message callback) runs under `catch_unwind`; every `unsafe` block has a `// SAFETY:` comment; the public API is safe.
 - **Counted:** `perf.stats` `decode.hardware` (frames, software frames, sessions, declined,
   fallbacks; `filmcraft_codecs::hw::hw_stats`) and `backend` (the registered backend's name,
   `filmcraft_codecs::hw::hw_backend`). `export.hardware` counts the NVENC encoder's frames, sessions and declines.
@@ -162,6 +196,9 @@ level and flags are the encoder's own. If it is missing the export stops with th
 | `tests/nvenc.rs` (Windows, NVIDIA) | H.264 from NVENC (1280×720, 6 Mbps, 72 frames) decodes with our decoder at worst 46.9 dB luma PSNR; IDR at 0, 24 and 48; dts / pts right |
 | `tests/nvenc_export.rs` (Windows, NVIDIA) | Export with hardware encoding against the software encoder through the export pipeline: the two decoded files at worst 54.8 dB luma PSNR; ffmpeg decodes the file without errors; declined cases go to the software encoder; the counters |
 | `src/nvenc/abi_tests.rs` (Windows) | FFI structs' sizes, alignments, field offsets, constants and GUIDs against a C compiler's view of NVIDIA's `nvEncodeAPI.h` (12.1) |
+| `tests/vaapi.rs` (Linux, VA-API) | HEVC Main (open GOP: CRA + RASL), Main 10, scaling lists, 3 slices with WPP (10-bit), weighted prediction with 4 references, transform skip + AMP + B-pyramid (10-bit, open GOP), Main / Main 10 at 1080p and 2160p (compared picture by picture, little memory); H.264 High (B-pyramid), Constrained Baseline with 3 slices per picture, Main with explicit weighted prediction (P and B) and 4 references, temporal direct, custom scaling matrices (JVT) with the 8x8 transform and 2 slices, an open-GOP stream, and 1080p / 2160p, 640×360 (coded 368: cropping): every picture **bit-exact** with our software decoder, same pts order, count, colour and aspect, also after `reset` + reseek to every later sync sample (after an open-GOP I picture, from the seek point on), a mid-stream `flush` with decoding carrying on, and a full pass after resets; forced mid-stream failures (`VaDecoder::fail_after`) at five points continue with the software decoder's exact output; interlaced and 10-bit H.264, 4:2:2 HEVC and the Off setting are declined; an HEVC mid-GOP flush is not checked (it ends the stream, as in software); seeded mutation of samples (through the hybrid and straight into the hardware decoder) and of `avcC` records never panics or hangs; 40 decoders created and dropped; concurrent decoders; a decoder moving between threads |
+| `src/vaapi/tests.rs` (every OS) | The H.264 and HEVC front ends with a recording stand-in for the hardware, on x264 streams (B-pyramid, weighted prediction, 4 slices, open GOP with temporal direct) and x265 streams (open GOP with RASL, B-pyramid, Main 10 with 2 slices and weighted prediction): output order and pts are the software decoder's, also after seeks and a mid-stream flush; every buffer is consistent (current surface free, references decoded and listed once, reference lists of the active length, slice data offsets inside the slice); damaged samples are errors |
+| `src/vaapi/abi_tests.rs` | FFI structs' sizes, alignments, field offsets, constants and bit-field positions against a C compiler's view of libva's `va.h` and `va_dec_hevc.h` (VA-API 1.23) |
 
 Fixtures are made with ffmpeg into `target/fixtures/platform/` (generator only, never linked);
 tests skip without ffmpeg or without a hardware decoder.
@@ -185,9 +222,14 @@ M4 Pro, load 150–190 (`cargo xtask bench --hw off|auto`): CPU per decoded fram
 playback with no dropped frames at Full, 1/2 and 1/4. Details in
 [docs/performance.md](../../docs/performance.md).
 
+Hardware decoding, Linux (Intel Iris Xe, iHD driver; `cargo xtask bench --hw off|auto`): CPU per
+decoded frame H.264 1080p 104 → 2.3 ms, 2160p 417 → 11.4 ms; HEVC 1080p 46 → 2.3 ms, 2160p
+203 → 10.1 ms, Main 10 2160p 212 → 18.4 ms.
+Details in [docs/performance.md](../../docs/performance.md).
+
 ## Not yet
 
 Zero-copy upload of decoded pictures into wgpu textures (`CVPixelBuffer`s on macOS, Direct3D 11
-textures on Windows); B-frames and 10-bit / HDR HEVC (Main 10) in hardware encoding; VA-API (Linux)
-decoders; field-coded H.264; HEVC, 10-bit and HDR encoding with NVENC, and encoders from other
+textures on Windows); B-frames and 10-bit / HDR HEVC (Main 10) in hardware encoding; HEVC, VP9 and
+VP9 and AV1 through VA-API (Linux), and VA-API encoding; field-coded H.264; HEVC, 10-bit and HDR encoding with NVENC, and encoders from other
 vendors on Windows (through Media Foundation); VP9 / AV1 4:4:4 and 12-bit on Windows.

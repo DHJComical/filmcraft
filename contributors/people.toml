@@ -24,3 +24,6 @@ sync_github_name = false
 
 [people.IppSec]
 sync_github_name = true
+
+[people.ItzBloxy]
+display_name = "Bloxy"
