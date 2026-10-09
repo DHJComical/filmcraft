@@ -25,7 +25,7 @@
 // OTHER DEALINGS IN THE SOFTWARE.
 
 //! The NVIDIA Video Codec SDK's encode API (`nvEncodeAPI.h`, API 12.1, MIT-licensed header by
-//! NVIDIA) as the driver's `nvEncodeAPI64.dll` expects it: the structures this backend fills in,
+//! NVIDIA) as the driver's `nvEncodeAPI64.dll` / `libnvidia-encode.so.1` expects it: the structures this backend fills in,
 //! the function table, and the constants it uses. Written from the public header; sizes and field
 //! offsets are checked against a C compiler's by the generated `abi_tests.rs`.
 //!
@@ -38,7 +38,26 @@
 
 use std::ffi::{c_char, c_int, c_void};
 
-use windows::core::GUID;
+// NVIDIA's public header defines this same layout on non-Windows systems.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Guid {
+    data1: u32,
+    data2: u16,
+    data3: u16,
+    data4: [u8; 8],
+}
+
+impl Guid {
+    pub const fn from_values(data1: u32, data2: u16, data3: u16, data4: [u8; 8]) -> Self {
+        Self { data1, data2, data3, data4 }
+    }
+
+    #[cfg(test)]
+    pub const fn to_u128(self) -> u128 {
+        ((self.data1 as u128) << 96) | ((self.data2 as u128) << 80) | ((self.data3 as u128) << 64) | u64::from_be_bytes(self.data4) as u128
+    }
+}
 
 pub const NVENCAPI_VERSION: u32 = 12 | (1 << 24);
 
@@ -70,6 +89,7 @@ pub const NV_ENC_ERR_ENCODER_BUSY: NvStatus = 18;
 pub const NV_ENC_ERR_LOCK_BUSY: NvStatus = 13;
 
 pub const NV_ENC_DEVICE_TYPE_DIRECTX: u32 = 0;
+pub const NV_ENC_DEVICE_TYPE_CUDA: u32 = 1;
 pub const NV_ENC_MEMORY_HEAP_SYSMEM_CACHED: u32 = 2;
 pub const NV_ENC_BUFFER_FORMAT_NV12: u32 = 0x1;
 /// P010: 10-bit 4:2:0, 16-bit little-endian samples with the value in the high 10 bits.
@@ -119,15 +139,15 @@ pub const NV_ENC_CAPS_HEIGHT_MAX: u32 = 17;
 pub const NV_ENC_CAPS_WIDTH_MIN: u32 = 45;
 pub const NV_ENC_CAPS_HEIGHT_MIN: u32 = 46;
 
-pub const NV_ENC_CODEC_H264_GUID: GUID = GUID::from_values(0x6bc82762, 0x4e63, 0x4ca4, [0xaa, 0x85, 0x1e, 0x50, 0xf3, 0x21, 0xf6, 0xbf]);
-pub const NV_ENC_CODEC_HEVC_GUID: GUID = GUID::from_values(0x790cdc88, 0x4522, 0x4d7b, [0x94, 0x25, 0xbd, 0xa9, 0x97, 0x5f, 0x76, 0x03]);
-pub const NV_ENC_H264_PROFILE_BASELINE_GUID: GUID = GUID::from_values(0x0727bcaa, 0x78c4, 0x4c83, [0x8c, 0x2f, 0xef, 0x3d, 0xff, 0x26, 0x7c, 0x6a]);
-pub const NV_ENC_H264_PROFILE_MAIN_GUID: GUID = GUID::from_values(0x60b5c1d4, 0x67fe, 0x4790, [0x94, 0xd5, 0xc4, 0x72, 0x6d, 0x7b, 0x6e, 0x6d]);
-pub const NV_ENC_H264_PROFILE_HIGH_GUID: GUID = GUID::from_values(0xe7cbc309, 0x4f7a, 0x4b89, [0xaf, 0x2a, 0xd5, 0x37, 0xc9, 0x2b, 0xe3, 0x10]);
-pub const NV_ENC_HEVC_PROFILE_MAIN_GUID: GUID = GUID::from_values(0xb514c39a, 0xb55b, 0x40fa, [0x87, 0x8f, 0xf1, 0x25, 0x3b, 0x4d, 0xfd, 0xec]);
-pub const NV_ENC_HEVC_PROFILE_MAIN10_GUID: GUID = GUID::from_values(0xfa4d2b6c, 0x3a5b, 0x411a, [0x80, 0x18, 0x0a, 0x3f, 0x5e, 0x3c, 0x9b, 0xe5]);
-pub const NV_ENC_PRESET_P4_GUID: GUID = GUID::from_values(0x90a7b826, 0xdf06, 0x4862, [0xb9, 0xd2, 0xcd, 0x6d, 0x73, 0xa0, 0x86, 0x81]);
-pub const NV_ENC_PRESET_P5_GUID: GUID = GUID::from_values(0x21c6e6b4, 0x297a, 0x4cba, [0x99, 0x8f, 0xb6, 0xcb, 0xde, 0x72, 0xad, 0xe3]);
+pub const NV_ENC_CODEC_H264_GUID: Guid = Guid::from_values(0x6bc82762, 0x4e63, 0x4ca4, [0xaa, 0x85, 0x1e, 0x50, 0xf3, 0x21, 0xf6, 0xbf]);
+pub const NV_ENC_CODEC_HEVC_GUID: Guid = Guid::from_values(0x790cdc88, 0x4522, 0x4d7b, [0x94, 0x25, 0xbd, 0xa9, 0x97, 0x5f, 0x76, 0x03]);
+pub const NV_ENC_H264_PROFILE_BASELINE_GUID: Guid = Guid::from_values(0x0727bcaa, 0x78c4, 0x4c83, [0x8c, 0x2f, 0xef, 0x3d, 0xff, 0x26, 0x7c, 0x6a]);
+pub const NV_ENC_H264_PROFILE_MAIN_GUID: Guid = Guid::from_values(0x60b5c1d4, 0x67fe, 0x4790, [0x94, 0xd5, 0xc4, 0x72, 0x6d, 0x7b, 0x6e, 0x6d]);
+pub const NV_ENC_H264_PROFILE_HIGH_GUID: Guid = Guid::from_values(0xe7cbc309, 0x4f7a, 0x4b89, [0xaf, 0x2a, 0xd5, 0x37, 0xc9, 0x2b, 0xe3, 0x10]);
+pub const NV_ENC_HEVC_PROFILE_MAIN_GUID: Guid = Guid::from_values(0xb514c39a, 0xb55b, 0x40fa, [0x87, 0x8f, 0xf1, 0x25, 0x3b, 0x4d, 0xfd, 0xec]);
+pub const NV_ENC_HEVC_PROFILE_MAIN10_GUID: Guid = Guid::from_values(0xfa4d2b6c, 0x3a5b, 0x411a, [0x80, 0x18, 0x0a, 0x3f, 0x5e, 0x3c, 0x9b, 0xe5]);
+pub const NV_ENC_PRESET_P4_GUID: Guid = Guid::from_values(0x90a7b826, 0xdf06, 0x4862, [0xb9, 0xd2, 0xcd, 0x6d, 0x73, 0xa0, 0x86, 0x81]);
+pub const NV_ENC_PRESET_P5_GUID: Guid = Guid::from_values(0x21c6e6b4, 0x297a, 0x4cba, [0x99, 0x8f, 0xb6, 0xcb, 0xde, 0x72, 0xad, 0xe3]);
 
 pub type Handle = *mut c_void;
 
@@ -321,7 +341,7 @@ pub union NV_ENC_CODEC_CONFIG {
 #[derive(Clone, Copy)]
 pub struct NV_ENC_CONFIG {
     pub version: u32,
-    pub profileGUID: GUID,
+    pub profileGUID: Guid,
     pub gopLength: u32,
     pub frameIntervalP: i32,
     pub monoChromeEncoding: u32,
@@ -353,8 +373,8 @@ pub struct NVENC_EXTERNAL_ME_HINT_COUNTS_PER_BLOCKTYPE {
 #[derive(Clone, Copy)]
 pub struct NV_ENC_INITIALIZE_PARAMS {
     pub version: u32,
-    pub encodeGUID: GUID,
-    pub presetGUID: GUID,
+    pub encodeGUID: Guid,
+    pub presetGUID: Guid,
     pub encodeWidth: u32,
     pub encodeHeight: u32,
     pub darWidth: u32,
@@ -582,7 +602,7 @@ pub struct NV_ENCODE_API_FUNCTION_LIST {
     pub nvEncGetEncodeGUIDs: Unused,
     pub nvEncGetInputFormatCount: Unused,
     pub nvEncGetInputFormats: Unused,
-    pub nvEncGetEncodeCaps: Option<unsafe extern "system" fn(Handle, GUID, *mut NV_ENC_CAPS_PARAM, *mut c_int) -> NvStatus>,
+    pub nvEncGetEncodeCaps: Option<unsafe extern "system" fn(Handle, Guid, *mut NV_ENC_CAPS_PARAM, *mut c_int) -> NvStatus>,
     pub nvEncGetEncodePresetCount: Unused,
     pub nvEncGetEncodePresetGUIDs: Unused,
     pub nvEncGetEncodePresetConfig: Unused,
@@ -614,7 +634,7 @@ pub struct NV_ENCODE_API_FUNCTION_LIST {
     pub nvEncRunMotionEstimationOnly: Unused,
     pub nvEncGetLastErrorString: Option<unsafe extern "system" fn(Handle) -> *const c_char>,
     pub nvEncSetIOCudaStreams: Unused,
-    pub nvEncGetEncodePresetConfigEx: Option<unsafe extern "system" fn(Handle, GUID, GUID, u32, *mut NV_ENC_PRESET_CONFIG) -> NvStatus>,
+    pub nvEncGetEncodePresetConfigEx: Option<unsafe extern "system" fn(Handle, Guid, Guid, u32, *mut NV_ENC_PRESET_CONFIG) -> NvStatus>,
     pub nvEncGetSequenceParamEx: Unused,
     pub nvEncRestoreEncoderState: Unused,
     pub nvEncLookaheadPicture: Unused,
