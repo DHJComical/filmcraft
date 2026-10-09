@@ -473,9 +473,10 @@ impl WcSource {
             // already output but the cache dropped needs a restart).
             let covers = !s.needs_key && s.start <= i && key <= s.next && (i >= s.next || want > s.out_max.get());
             if !covers {
-                // Don't interrupt a session that is still working towards its own frame.
-                let busy =
-                    s.copying.get() > 0 || (!s.needs_key && s.target != i64::MIN && s.out_max.get() < s.target && now_ms() - s.last_output.get() < STALE_MS);
+                // Don't interrupt a session that is still working towards its own frame, unless it
+                // has gone quiet for STALE_MS (a copyTo that never settles must not wedge it).
+                let fresh = now_ms() - s.last_output.get() < STALE_MS;
+                let busy = fresh && (s.copying.get() > 0 || (!s.needs_key && s.target != i64::MIN && s.out_max.get() < s.target));
                 if busy {
                     return Drive::Waiting;
                 }

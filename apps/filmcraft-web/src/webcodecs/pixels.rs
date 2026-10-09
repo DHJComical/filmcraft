@@ -67,9 +67,10 @@ fn plane(raw: &js_sys::Uint8Array, layout: &JsValue, width: u32, height: u32) ->
         raw.subarray(offset, end).copy_to(&mut out);
     } else {
         for (y, row) in out.chunks_exact_mut(width as usize).enumerate() {
-            // Bounds/overflow checked for the last row above; earlier rows are smaller.
-            let start = offset + y as u32 * stride;
-            raw.subarray(start, start + width).copy_to(row);
+            // Checked for the last row above; earlier rows are smaller, but stay checked anyway.
+            let start = u32::try_from(y).ok().and_then(|y| y.checked_mul(stride)).and_then(|n| offset.checked_add(n)).ok_or("layout")?;
+            let row_end = start.checked_add(width).filter(|e| *e <= end).ok_or("layout")?;
+            raw.subarray(start, row_end).copy_to(row);
         }
     }
     Ok(out)
