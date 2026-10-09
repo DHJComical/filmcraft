@@ -177,15 +177,64 @@ fn open(p: &Path) -> MpegSource {
     MpegSource::open(p.file_name().unwrap().to_str().unwrap(), bytes(p)).unwrap()
 }
 
-/// ffprobe's video frames in display order: pts (90 kHz).
+/// ffprobe's video frames in display order: PTS (90 kHz). A program-stream picture
+/// need not carry its own PTS; use the decoder's presentation timestamp for that picture.
 fn ffprobe_frame_pts(file: &Path) -> Option<Vec<i64>> {
-    let fp = filmcraft_testkit::ffprobe()?;
+    let fp = filmcraft_testkit::ffprobe_or_skip("MPEG video frame presentation timestamps")?;
     let o = std::process::Command::new(fp)
-        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "frame=pts", "-of", "csv=p=0"])
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "frame=pts,best_effort_timestamp", "-of", "json"])
         .arg(file)
         .output()
-        .ok()?;
-    Some(String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| l.trim().trim_end_matches(',').parse().ok()).collect())
+        .unwrap_or_else(|error| panic!("{}: cannot run ffprobe: {error}", file.display()));
+    assert!(o.status.success(), "{}: ffprobe failed: {}", file.display(), String::from_utf8_lossy(&o.stderr));
+    Some(parse_ffprobe_frame_pts(&o.stdout).unwrap_or_else(|error| panic!("{}: {error}", file.display())))
+}
+
+fn parse_ffprobe_frame_pts(bytes: &[u8]) -> Result<Vec<i64>, String> {
+    let data: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| format!("invalid ffprobe JSON: {error}"))?;
+    let frames = data.get("frames").and_then(serde_json::Value::as_array).ok_or("ffprobe output is missing its frames array")?;
+    if frames.is_empty() {
+        return Err("ffprobe returned no video frames".into());
+    }
+    frames
+        .iter()
+        .enumerate()
+        .map(|(index, frame)| {
+            let field = if frame.get("pts").is_some() { "pts" } else { "best_effort_timestamp" };
+            frame.get(field).and_then(serde_json::Value::as_i64).ok_or_else(|| format!("ffprobe video frame {index} is missing an integer {field}"))
+        })
+        .collect()
+}
+
+#[test]
+fn ffprobe_pts_preserve_missing_raw_timestamps_and_side_data() {
+    let output = br#"{"frames":[
+        {"pts":131400,"best_effort_timestamp":131401,"side_data_list":[{},{}]},
+        {"best_effort_timestamp":135000,"side_data_list":[{}]},
+        {"pts":138600,"best_effort_timestamp":138600}
+    ]}"#;
+    assert_eq!(parse_ffprobe_frame_pts(output).unwrap(), [131400, 135000, 138600], "keep every display frame, with raw PTS preferred when present");
+    assert_eq!(parse_ffprobe_frame_pts(br#"{"frames":[{"pts":-3600},{"pts":0},{"pts":9223372036854775807}]}"#).unwrap(), [-3600, 0, i64::MAX]);
+}
+
+#[test]
+fn malformed_ffprobe_pts_fail_instead_of_dropping_frames() {
+    for output in [
+        "not JSON",
+        "{}",
+        r#"{"frames":{}}"#,
+        r#"{"frames":[]}"#,
+        r#"{"frames":[{}]}"#,
+        r#"{"frames":[null]}"#,
+        r#"{"frames":[{"pts":"N/A","best_effort_timestamp":135000}]}"#,
+        r#"{"frames":[{"pts":null,"best_effort_timestamp":135000}]}"#,
+        r#"{"frames":[{"pts":1.5}]}"#,
+        r#"{"frames":[{"pts":9223372036854775808}]}"#,
+        r#"{"frames":[{"best_effort_timestamp":"135000"}]}"#,
+        r#"{"frames":[{"pts":131400},{"best_effort_timestamp":null},{"pts":138600}]}"#,
+    ] {
+        assert!(parse_ffprobe_frame_pts(output.as_bytes()).is_err(), "malformed oracle output must fail: {output}");
+    }
 }
 
 /// Decode every frame in order and `seeks` random frames; compare with ffmpeg within `tol`.

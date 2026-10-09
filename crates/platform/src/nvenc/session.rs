@@ -1,4 +1,4 @@
-//! An NVENC H.264 encode session: the driver library, the Direct3D 11 device it is opened on, the
+//! An NVENC (H.264 or HEVC) encode session: the driver library, the Direct3D 11 device it is opened on, the
 //! encoder configuration, and the input / output buffers (every call into the driver).
 //!
 //! FFI module (docs/adr/0001-platform-ffi.md): every `unsafe` block has a `// SAFETY:` comment, the
@@ -99,7 +99,23 @@ fn nvidia_device() -> Result<ID3D11Device, String> {
     Err("no NVIDIA adapter".into())
 }
 
-/// What the encoder says it can do for H.264.
+/// The codec a session encodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Codec {
+    H264,
+    Hevc,
+}
+
+impl Codec {
+    fn guid(self) -> windows::core::GUID {
+        match self {
+            Codec::H264 => NV_ENC_CODEC_H264_GUID,
+            Codec::Hevc => NV_ENC_CODEC_HEVC_GUID,
+        }
+    }
+}
+
+/// What the encoder says it can do for a codec.
 #[derive(Clone, Copy, Debug)]
 pub struct Caps {
     pub max_bframes: u32,
@@ -110,6 +126,7 @@ pub struct Caps {
 /// Encoder settings (already validated by the caller).
 #[derive(Clone, Debug)]
 pub struct Params {
+    pub codec: Codec,
     pub width: u32,
     pub height: u32,
     pub fps: (u32, u32),
@@ -117,8 +134,9 @@ pub struct Params {
     pub max_bitrate: u32,
     pub cbr: bool,
     pub gop: u32,
-    /// 0 baseline, 1 main, 2 high.
+    /// H.264 only: 0 baseline, 1 main, 2 high (HEVC is always Main).
     pub profile: u8,
+    /// The codec's own level code: `level × 10` for H.264, `level × 30` for HEVC.
     pub level: Option<u8>,
     pub sar: Option<(u32, u32)>,
     /// B-frames between references (0 or 1).
@@ -181,7 +199,8 @@ fn status(what: &str, s: NvStatus, enc: Handle, api: &Api) -> String {
             })
         })
         .flatten()
-        .filter(|d| !d.is_empty());
+        // the driver's text is sometimes not text at all (HEVC parameter errors): keep it only when readable
+        .filter(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_graphic() || c == ' '));
     match detail {
         Some(d) => format!("{what} failed ({s}): {d}"),
         None => format!("{what} failed ({s})"),
@@ -221,8 +240,8 @@ impl Session {
         Ok(Session { api, enc, _device: device, slots: Vec::new(), size: (0, 0), out_size: 0 })
     }
 
-    /// The encoder's limits for H.264.
-    pub fn caps(&self) -> Result<Caps, String> {
+    /// The encoder's limits for `codec` (an error when the GPU cannot encode it).
+    pub fn caps(&self, codec: Codec) -> Result<Caps, String> {
         let get = |cap: u32| -> Result<u32, String> {
             let f = self.api.list.nvEncGetEncodeCaps.ok_or("no nvEncGetEncodeCaps")?;
             // SAFETY: a valid session, a zeroed parameter block with its version, one int out.
@@ -231,9 +250,9 @@ impl Session {
                 p.version = NV_ENC_CAPS_PARAM_VER;
                 p.capsToQuery = cap;
                 let mut v = 0i32;
-                let s = f(self.enc, NV_ENC_CODEC_H264_GUID, &mut p, &mut v);
+                let s = f(self.enc, codec.guid(), &mut p, &mut v);
                 if s != NV_ENC_SUCCESS {
-                    return Err(status("querying the encoder", s, self.enc, self.api));
+                    return Err(status(if codec == Codec::Hevc { "querying the HEVC encoder" } else { "querying the encoder" }, s, self.enc, self.api));
                 }
                 Ok(v.max(0) as u32)
             }
@@ -256,16 +275,17 @@ impl Session {
             let mut preset: Box<NV_ENC_PRESET_CONFIG> = Box::new(std::mem::zeroed());
             preset.version = NV_ENC_PRESET_CONFIG_VER;
             preset.presetCfg.version = NV_ENC_CONFIG_VER;
-            let s = preset_fn(self.enc, NV_ENC_CODEC_H264_GUID, NV_ENC_PRESET_P5_GUID, NV_ENC_TUNING_INFO_HIGH_QUALITY, &mut *preset);
+            let s = preset_fn(self.enc, p.codec.guid(), NV_ENC_PRESET_P5_GUID, NV_ENC_TUNING_INFO_HIGH_QUALITY, &mut *preset);
             if s != NV_ENC_SUCCESS {
                 return Err(status("reading the encoder preset", s, self.enc, self.api));
             }
             let mut cfg: Box<NV_ENC_CONFIG> = Box::new(preset.presetCfg);
             cfg.version = NV_ENC_CONFIG_VER;
-            cfg.profileGUID = match p.profile {
-                0 => NV_ENC_H264_PROFILE_BASELINE_GUID,
-                1 => NV_ENC_H264_PROFILE_MAIN_GUID,
-                _ => NV_ENC_H264_PROFILE_HIGH_GUID,
+            cfg.profileGUID = match (p.codec, p.profile) {
+                (Codec::Hevc, _) => NV_ENC_HEVC_PROFILE_MAIN_GUID,
+                (Codec::H264, 0) => NV_ENC_H264_PROFILE_BASELINE_GUID,
+                (Codec::H264, 1) => NV_ENC_H264_PROFILE_MAIN_GUID,
+                (Codec::H264, _) => NV_ENC_H264_PROFILE_HIGH_GUID,
             };
             cfg.gopLength = p.gop.max(1);
             cfg.frameIntervalP = 1 + p.bframes as i32;
@@ -277,28 +297,62 @@ impl Session {
             // a one-second buffer, the usual for streaming-style rate control
             rc.vbvBufferSize = rc.maxBitRate;
             rc.vbvInitialDelay = rc.vbvBufferSize;
-            let h = &mut cfg.encodeCodecConfig.h264Config;
-            h.idrPeriod = p.gop.max(1);
-            h.level = p.level.map_or(NV_ENC_LEVEL_AUTOSELECT, u32::from);
-            h.flags &= !(H264_OUTPUT_AUD | H264_REPEAT_SPSPPS);
-            h.entropyCodingMode = if p.profile == 0 { 2 } else { NV_ENC_H264_ENTROPY_CODING_MODE_CABAC };
-            h.maxNumRefFrames = 0;
-            // BT.709 limited range, like our own encoder's default signalling
-            let vui = &mut h.h264VUIParameters;
-            vui.videoSignalTypePresentFlag = 1;
-            vui.videoFormat = NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
-            vui.videoFullRangeFlag = 0;
-            vui.colourDescriptionPresentFlag = 1;
-            vui.colourPrimaries = NV_ENC_VUI_COLOR_PRIMARIES_BT709;
-            vui.transferCharacteristics = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
-            vui.colourMatrix = NV_ENC_VUI_MATRIX_COEFFS_BT709;
-            vui.timingInfoPresentFlag = 1;
-            vui.numUnitInTicks = p.fps.1;
-            vui.timeScale = p.fps.0.saturating_mul(2);
+            match p.codec {
+                Codec::H264 => {
+                    let h = &mut cfg.encodeCodecConfig.h264Config;
+                    h.idrPeriod = p.gop.max(1);
+                    h.level = p.level.map_or(NV_ENC_LEVEL_AUTOSELECT, u32::from);
+                    h.flags &= !(H264_OUTPUT_AUD | H264_REPEAT_SPSPPS);
+                    h.entropyCodingMode = if p.profile == 0 { 2 } else { NV_ENC_H264_ENTROPY_CODING_MODE_CABAC };
+                    h.maxNumRefFrames = 0;
+                    // BT.709 limited range, like our own encoder's default signalling
+                    let vui = &mut h.h264VUIParameters;
+                    vui.videoSignalTypePresentFlag = 1;
+                    vui.videoFormat = NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
+                    vui.videoFullRangeFlag = 0;
+                    vui.colourDescriptionPresentFlag = 1;
+                    vui.colourPrimaries = NV_ENC_VUI_COLOR_PRIMARIES_BT709;
+                    vui.transferCharacteristics = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
+                    vui.colourMatrix = NV_ENC_VUI_MATRIX_COEFFS_BT709;
+                    vui.timingInfoPresentFlag = 1;
+                    vui.numUnitInTicks = p.fps.1;
+                    vui.timeScale = p.fps.0.saturating_mul(2);
+                }
+                Codec::Hevc => {
+                    let h = &mut cfg.encodeCodecConfig.hevcConfig;
+                    h.level = p.level.map_or(NV_ENC_LEVEL_AUTOSELECT, u32::from);
+                    h.tier = NV_ENC_TIER_HEVC_MAIN;
+                    h.minCUSize = NV_ENC_HEVC_CUSIZE_AUTOSELECT;
+                    h.maxCUSize = NV_ENC_HEVC_CUSIZE_AUTOSELECT;
+                    h.idrPeriod = p.gop.max(1);
+                    // parameter sets only in the first IDR (and the hvcC), no access unit delimiters, 8-bit 4:2:0
+                    h.flags &= !(HEVC_OUTPUT_AUD
+                        | HEVC_DISABLE_SPSPPS
+                        | HEVC_REPEAT_SPSPPS
+                        | HEVC_ENABLE_INTRA_REFRESH
+                        | HEVC_CHROMA_FORMAT_MASK
+                        | HEVC_PIXEL_BIT_DEPTH_MASK);
+                    h.flags |= 1 << HEVC_CHROMA_FORMAT_SHIFT;
+                    h.maxNumRefFramesInDPB = 0;
+                    // BT.709 limited range, like the H.264 path; an HEVC VUI counts frames, not fields:
+                    // frame rate = time_scale / num_units_in_tick
+                    let vui = &mut h.hevcVUIParameters;
+                    vui.videoSignalTypePresentFlag = 1;
+                    vui.videoFormat = NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
+                    vui.videoFullRangeFlag = 0;
+                    vui.colourDescriptionPresentFlag = 1;
+                    vui.colourPrimaries = NV_ENC_VUI_COLOR_PRIMARIES_BT709;
+                    vui.transferCharacteristics = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
+                    vui.colourMatrix = NV_ENC_VUI_MATRIX_COEFFS_BT709;
+                    vui.timingInfoPresentFlag = 1;
+                    vui.numUnitInTicks = p.fps.1;
+                    vui.timeScale = p.fps.0;
+                }
+            }
 
             let mut init: Box<NV_ENC_INITIALIZE_PARAMS> = Box::new(std::mem::zeroed());
             init.version = NV_ENC_INITIALIZE_PARAMS_VER;
-            init.encodeGUID = NV_ENC_CODEC_H264_GUID;
+            init.encodeGUID = p.codec.guid();
             init.presetGUID = NV_ENC_PRESET_P5_GUID;
             init.encodeWidth = p.width;
             init.encodeHeight = p.height;
@@ -363,7 +417,7 @@ impl Session {
         self.slots.len()
     }
 
-    /// The SPS and PPS as one Annex B byte string.
+    /// The parameter sets as one Annex B byte string (SPS and PPS; VPS, SPS and PPS for HEVC).
     pub fn sequence_params(&self) -> Result<Vec<u8>, String> {
         let f = self.api.list.nvEncGetSequenceParams.ok_or("no nvEncGetSequenceParams")?;
         let mut buf = vec![0u8; 1024];
