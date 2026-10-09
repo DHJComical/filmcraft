@@ -8,8 +8,8 @@ use filmcraft_edit::{Edge, TrimMode};
 use filmcraft_media::Generator;
 use filmcraft_media::generators::GeneratorSource;
 use filmcraft_project::{
-    ClipId, ItemId, ItemKind, Label, Marker, MarkerId, MarkerKind, MediaClip, MediaRef, ParamValue, SequenceSettings, TrackId, TrackKind, Transition,
-    TransitionId, resolve_auto_points,
+    ClipId, ItemId, ItemKind, Label, Marker, MarkerId, MarkerKind, MediaClip, MediaRef, ParamValue, Project, SequenceSettings, Track, TrackId, TrackKind,
+    Transition, TransitionId, resolve_auto_points,
 };
 use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, TimeRange, parse_timecode};
 use serde_json::{Value, json};
@@ -485,6 +485,57 @@ fn set_matte_color(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"item": item.0, "color": filmcraft_color::to_hex(color)}))
 }
 
+/// One audio clip of a placement: how many tracks below the destination it goes, and the source
+/// channels it plays (`None` = the clip's own default, used for the first one).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AudioPlacementSpec {
+    pub track_offset: usize,
+    pub source_channels: Option<Vec<u16>>,
+}
+
+/// The audio clips to place for a source whose Modify ▸ Audio Channels map has `clips` (one entry
+/// per clip): always at least one (on the destination track), then one per further entry on the
+/// tracks below. The count is capped at [`crate::sequence_tools::MAX_TRACKS`] (the map comes from
+/// project files and scripts: never trusted).
+pub(crate) fn audio_placement_specs(clips: &[Vec<u16>]) -> Vec<AudioPlacementSpec> {
+    let mut specs = vec![AudioPlacementSpec { track_offset: 0, source_channels: None }];
+    let extra = clips.iter().skip(1).take(crate::sequence_tools::MAX_TRACKS.saturating_sub(1));
+    specs.extend(extra.enumerate().map(|(k, chans)| AudioPlacementSpec { track_offset: k.saturating_add(1), source_channels: Some(chans.clone()) }));
+    specs
+}
+
+/// Make sure the sequence has audio tracks for `count` clips starting at track index `first`,
+/// adding tracks at the bottom when it has fewer. A new track is a copy of the destination track
+/// (channel format, volume, pan, inserts) without its clips, transitions, lock / mute / solo
+/// state or mixer routing. Returns the ids of all the sequence's audio tracks, in order.
+pub(crate) fn ensure_audio_tracks(p: &mut Project, seq_id: ItemId, first: usize, count: usize, label: &str) -> Result<Vec<TrackId>> {
+    let (have, template) = {
+        let q = p.sequence(seq_id).ok_or(EngineError::NoSequence)?;
+        (q.audio_tracks.len(), q.audio_tracks.get(first).or(q.audio_tracks.last()).cloned())
+    };
+    let need = first.saturating_add(count);
+    if need > crate::sequence_tools::MAX_TRACKS {
+        return Err(bad(label, format!("a sequence has at most {} audio tracks", crate::sequence_tools::MAX_TRACKS)));
+    }
+    if need > have {
+        let ids: Vec<(usize, TrackId)> = (have..need).map(|k| (k, TrackId(p.alloc_id()))).collect();
+        let q = p.sequence_mut(seq_id).ok_or(EngineError::NoSequence)?;
+        for (k, id) in ids {
+            let mut t = template.clone().unwrap_or_else(|| Track::new(id, TrackKind::Audio, String::new()));
+            t.id = id;
+            t.name = format!("Audio {}", k + 1);
+            t.items.clear();
+            t.transitions.clear();
+            t.locked = false;
+            t.muted = false;
+            t.solo = false;
+            t.mixer = Default::default();
+            q.audio_tracks.push(t);
+        }
+    }
+    Ok(p.sequence(seq_id).map(|q| q.audio_tracks.iter().map(|t| t.id).collect()).unwrap_or_default())
+}
+
 /// Place a project item on the timeline (drag from Project, or Insert/Overwrite from source).
 pub(crate) fn place_item(
     s: &mut Session,
@@ -539,21 +590,28 @@ pub(crate) fn place_item(
             let (arange, aat) = audio_split.unwrap_or((range, at));
             let mut a = p.make_track_item(item, TrackKind::Audio, aat, arange, rate).ok_or_else(|| bad(label, "bad item"))?;
             // Modify ▸ Audio Channels with several audio clips: one per clip, on the tracks below
-            let extra: Vec<Vec<u16>> = p
-                .item(item)
-                .and_then(|i| i.as_media())
-                .and_then(|m| m.interpret.audio_channels.as_ref())
-                .map(|m| m.clips.iter().skip(1).cloned().collect())
-                .unwrap_or_default();
-            let tracks: Vec<TrackId> = p.sequence(seq_id).map(|q| q.audio_tracks.iter().map(|t| t.id).collect()).unwrap_or_default();
-            let first = tracks.iter().position(|t| *t == adest).unwrap_or(0);
-            a.link = if link.is_none() && !extra.is_empty() { Some(p.alloc_id()) } else { link };
-            placements.push((adest, a.clone()));
-            for (k, chans) in extra.into_iter().enumerate() {
-                let Some(tid) = tracks.get(first + k + 1) else { break };
+            let clips: Vec<Vec<u16>> =
+                p.item(item).and_then(|i| i.as_media()).and_then(|m| m.interpret.audio_channels.as_ref()).map(|m| m.clips.clone()).unwrap_or_default();
+            let specs = audio_placement_specs(&clips);
+            let first = p.sequence(seq_id).and_then(|q| q.audio_tracks.iter().position(|t| t.id == adest)).unwrap_or(0);
+            // too few audio tracks below the destination: grow the sequence from the destination track
+            let tracks = ensure_audio_tracks(p, seq_id, first, specs.len(), label)?;
+            a.link = if link.is_none() && specs.len() > 1 { Some(p.alloc_id()) } else { link };
+            for spec in specs {
+                let tid = match spec.track_offset {
+                    0 => &adest,
+                    off => match first.checked_add(off).and_then(|i| tracks.get(i)) {
+                        Some(t) => t,
+                        None => continue,
+                    },
+                };
                 let mut b = a.clone();
-                b.id = ClipId(p.alloc_id());
-                b.source_channels = chans;
+                if spec.track_offset > 0 {
+                    b.id = ClipId(p.alloc_id());
+                }
+                if let Some(chans) = spec.source_channels {
+                    b.source_channels = chans;
+                }
                 placements.push((*tid, b));
             }
         }

@@ -1022,6 +1022,8 @@ mod aaf_omf_tests;
 #[cfg(test)]
 mod audio_effects_tests;
 #[cfg(test)]
+mod audio_placement_tests;
+#[cfg(test)]
 mod autosave_tests;
 #[cfg(test)]
 mod clip_ops_tests;
