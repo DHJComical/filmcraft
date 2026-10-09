@@ -314,9 +314,11 @@ file ──► codecs (MP4/MOV, MKV, audio)        demux + decode, GOP-aware see
   not zero (`VideoFrame::alpha_region`, `to_linear_f32_region`, `blend::composite_at`), the rest
   being transparent anyway; and working images are recycled through `filmcraft_frame::pool`
   (`take_f32_overwritten` / `recycle_f32`: the buffer comes back with its old contents, so there is
-  no zero-fill) by the export pipeline once a frame is converted to 8 bits. A clip with effects,
-  opacity masks, frame blending, colour management, or a picture that is not placed one to one on
-  the output takes the general path.
+  no zero-fill) by the export pipeline once a frame is converted to 8 bits; a standalone export's
+  pipeline frees the idle float images (`pool::trim_f32`) when it goes away, so a finished export
+  leaves none behind (parts of a batch, such as render-preview segments, keep them for the next part). A clip
+  with effects, opacity masks, frame blending, colour management, or a picture that is not placed
+  one to one on the output takes the general path.
 - **Frame scheduling.** `crates/ui-egui/src/frames.rs` runs a small pool of worker threads with
   prioritised jobs: the frame on screen first, then playback prefetch, then thumbnails. The UI never
   decodes. It shows the exact frame when it is ready and holds the nearest cached frame meanwhile.
