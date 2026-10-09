@@ -344,7 +344,7 @@ async fn main() {
             match r {
                 Ok(v) => {
                     print(&a, &v);
-                    eprintln!("exported {out} in {:.1}s", t0.elapsed().as_secs_f64());
+                    eprintln!("exported {} in {:.1}s", written_paths(&v, out).join(", "), t0.elapsed().as_secs_f64());
                 }
                 Err(e) => fail(format!("export: {e}")),
             }
@@ -381,6 +381,24 @@ async fn main() {
     }
 }
 
+/// The files an export wrote, from its result: `path` of a direct export, or each queued item's
+/// `path` (the format may have changed the extension: `out.mp4` exported as APV is `out.mp4.mov`).
+/// `requested` when the result names none.
+fn written_paths(result: &Value, requested: &str) -> Vec<String> {
+    let paths: Vec<String> = match result.get("path").and_then(Value::as_str) {
+        Some(p) => vec![p.to_string()],
+        None => result
+            .get("items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|i| i.get("path").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect(),
+    };
+    if paths.is_empty() { vec![requested.to_string()] } else { paths }
+}
+
 #[cfg(test)]
 mod format_tests {
     /// The CLI (and MCP / headless runs, which share its entry point) registers the hardware
@@ -389,6 +407,17 @@ mod format_tests {
     fn startup_registers_the_hardware_decoders() {
         let hardware = super::register_hardware_decoders();
         assert_eq!(filmcraft_platform::registered(), cfg!(any(target_os = "macos", target_os = "windows")), "{hardware:?}");
+    }
+
+    #[test]
+    fn export_message_names_the_written_files() {
+        use serde_json::json;
+        let direct = json!({"job": 1, "path": "out-apv.mp4.mov", "result": {"path": "out-apv.mp4.mov"}});
+        assert_eq!(super::written_paths(&direct, "out-apv.mp4"), ["out-apv.mp4.mov"]);
+        let queued = json!({"added": [1, 2], "items": [{"path": "a.mp4.mov"}, {"path": "b.wav"}]});
+        assert_eq!(super::written_paths(&queued, "a.mp4"), ["a.mp4.mov", "b.wav"]);
+        assert_eq!(super::written_paths(&json!({}), "x.mov"), ["x.mov"]);
+        assert_eq!(super::written_paths(&json!({"items": []}), "x.mov"), ["x.mov"]);
     }
 
     #[test]
