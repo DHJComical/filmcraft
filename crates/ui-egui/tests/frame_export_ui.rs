@@ -222,3 +222,43 @@ fn white_header_moves_both_dialogs_and_controls_still_work() {
         assert!(!has(&h, "exportFrame.name"));
     }
 }
+
+#[test]
+fn exported_frame_timecode_matches_each_monitor_and_stays_captured() {
+    for (rate, drop_frame) in [
+        (FrameRate::FPS_24, false),
+        (FrameRate::FPS_25, false),
+        (FrameRate::FPS_23_976, false),
+        (FrameRate::FPS_29_97, false),
+        (FrameRate::FPS_29_97, true),
+        (FrameRate::FPS_59_94, true),
+    ] {
+        let mut h = harness();
+        let seq = h.state().session.state.active_sequence.unwrap();
+        let settings = &mut Arc::make_mut(&mut h.state_mut().session.project).sequence_mut(seq).unwrap().settings;
+        settings.frame_rate = rate;
+        settings.drop_frame = drop_frame;
+        h.state_mut().session.set_playhead(rate.tick_of(rate.timecode_base() * 65 + 4));
+        h.state_mut().session.state.source_playhead = FrameRate::FPS_24.tick_of(67);
+        step(&mut h);
+        for monitor in ["source", "program"] {
+            let expected = h.state().auto.elements.iter().find(|e| e.id == format!("{monitor}.timecode")).unwrap().label.clone();
+            click(&mut h, &format!("{monitor}.transport.exportFrame"));
+            let displayed = h.state().auto.elements.iter().find(|e| e.id == "exportFrame.timecode").unwrap().label.clone();
+            assert_eq!(displayed, expected, "{monitor}, {rate:?}, drop-frame {drop_frame}");
+            if monitor == "source" {
+                assert_eq!(displayed, "00:00:02:19");
+                h.state_mut().session.state.source_playhead = Tick::ZERO;
+            } else {
+                h.state_mut().session.set_playhead(Tick::ZERO);
+            }
+            step(&mut h);
+            assert_eq!(
+                h.state().auto.elements.iter().find(|e| e.id == "exportFrame.timecode").unwrap().label,
+                displayed,
+                "captured time must remain fixed after either playhead moves"
+            );
+            click(&mut h, "exportFrame.close");
+        }
+    }
+}

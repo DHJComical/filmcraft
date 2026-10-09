@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 #[derive(Clone)]
 struct Draft {
     target: FrameExportTarget,
+    timecode: String,
     name: String,
     format: StillFormat,
     depth: u8,
@@ -26,6 +27,14 @@ fn clean(name: &str) -> String {
 
 pub fn open(app: &mut FilmcraftApp, ctx: &egui::Context, params: &Value) -> Result<Value, String> {
     let target = frame_export_target(&app.session, params).map_err(|e| e.to_string())?;
+    let (rate, drop_frame) = if target.source {
+        let view = filmcraft_engine::clip_ops::source_view(&app.session, target.item).ok_or("Source clip is unavailable")?;
+        (view.rate, false)
+    } else {
+        let sequence = app.session.project.sequence(target.item).ok_or("Program sequence is unavailable")?;
+        (sequence.settings.frame_rate, sequence.settings.drop_frame)
+    };
+    let timecode = filmcraft_time::format_time(target.time, rate, drop_frame, filmcraft_time::TimeDisplay::Timecode, 48000);
     if target.source {
         app.stop_source();
     } else if app.playback.playing {
@@ -39,7 +48,9 @@ pub fn open(app: &mut FilmcraftApp, ctx: &egui::Context, params: &Value) -> Resu
     });
     let name = if target.source { std::path::Path::new(&target.name).file_stem().and_then(|s| s.to_str()).unwrap_or(&target.name) } else { &target.name };
     let name = clean(name);
-    ctx.data_mut(|m| m.insert_temp(draft_id(), Some(Draft { target, name, format: StillFormat::Png, depth: 8, folder, import: false, replace: None })));
+    ctx.data_mut(|m| {
+        m.insert_temp(draft_id(), Some(Draft { target, timecode, name, format: StillFormat::Png, depth: 8, folder, import: false, replace: None }))
+    });
     ctx.request_repaint();
     Ok(json!({"dialog":"exportFrame"}))
 }
@@ -167,7 +178,8 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
             ui.separator();
             ui.label(format!("{} — {} × {}", if d.target.source { "Source" } else { "Program" }, d.target.width, d.target.height));
             ui.label(&d.target.name);
-            ui.label(format!("Frame time: {:.3} seconds", d.target.time.seconds()));
+            let r = ui.label(format!("Frame time: {}", d.timecode));
+            elems.push(("exportFrame.timecode".into(), r.rect, d.timecode.clone()));
         });
     });
     if shown.is_some() && movement != egui::Vec2::ZERO {

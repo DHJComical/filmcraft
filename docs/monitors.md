@@ -128,7 +128,9 @@ The suggested name is the source filename without its extension, or the sequence
 use Browse to choose the destination folder (or edit Path), and click OK. Existing files require
 an explicit Replace confirmation. Cancel and the header close button write nothing. The white
 header and dark body use original generic controls. Source details and frame time appear below
-the settings. The last successful folder is reused during the current app session.
+the settings. Frame time uses the same hours/minutes/seconds/frames timecode as its monitor,
+including the Program sequence's drop-frame setting, and stays captured while the dialog is open.
+The last successful folder is reused during the current app session.
 
 PNG and TIFF support 8 or 16 bits per channel. The 16-bit path quantizes directly from the
 float image, preserving precision beyond 8 bits. JPEG (quality 95) and BMP support 8-bit output;
