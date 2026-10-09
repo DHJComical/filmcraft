@@ -363,6 +363,17 @@ The tarball installer places FilmCraft, its command-line tool and desktop integr
 `~/.local`, without administrator permissions. For all users, run
 `sudo ./install.sh --prefix /usr/local` instead. Running the installer again updates the installation.
 
+**Gentoo (community-maintained):** the [::snakebyte overlay](https://github.com/switch87/snakebyte-overlay)
+packages the Linux release as `media-video/filmcraft-bin`. It is maintained by the community, not by the
+FilmCraft team, so report packaging problems to the overlay:
+
+```sh
+eselect repository add snakebyte git https://github.com/switch87/snakebyte-overlay.git
+emaint sync -r snakebyte
+echo 'media-video/filmcraft-bin ~amd64' >> /etc/portage/package.accept_keywords/filmcraft
+emerge --ask media-video/filmcraft-bin
+```
+
 ### FreeBSD
 
 | Build | File |
