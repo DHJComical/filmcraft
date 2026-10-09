@@ -1922,6 +1922,7 @@ dependencies = [
  "filmcraft-media",
  "filmcraft-project",
  "filmcraft-time",
+ "log",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

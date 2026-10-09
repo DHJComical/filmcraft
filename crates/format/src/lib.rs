@@ -211,19 +211,27 @@ pub fn decode(bytes: &[u8]) -> Result<Loaded, FormatError> {
 
 /// Refuse only values that would overflow or exhaust memory later (`Sequence::check_bounds`);
 /// structural rules such as overlaps are left to the editor, so projects that open today still open.
-fn validate_loaded(loaded: Loaded) -> Result<Loaded, FormatError> {
-    for item in loaded.project.items.values() {
-        if let filmcraft_project::ItemKind::Media(m) = &item.kind
-            && m.info.audio_streams.len() > filmcraft_media::MAX_AUDIO_STREAMS
-        {
-            return Err(FormatError::Corrupt(format!("media `{}`: too many audio streams", item.name)));
-        }
-        if let filmcraft_project::ItemKind::Sequence(sequence) = &item.kind {
-            for track in &sequence.audio_tracks {
-                if track.items.iter().any(|clip| clip.audio_stream >= filmcraft_media::MAX_AUDIO_STREAMS) {
-                    return Err(FormatError::Corrupt(format!("sequence `{}`: audio stream index out of range", item.name)));
+fn validate_loaded(mut loaded: Loaded) -> Result<Loaded, FormatError> {
+    // Out-of-range audio stream data is repaired, not refused: failing the load would lose the
+    // whole project over one bad index. A media item keeps its first `MAX_AUDIO_STREAMS` streams; a
+    // clip pointing past that plays stream 0.
+    let max = filmcraft_media::MAX_AUDIO_STREAMS;
+    for item in loaded.project.items.values_mut() {
+        let name = item.name.clone();
+        match &mut item.kind {
+            filmcraft_project::ItemKind::Media(m) if m.info.audio_streams.len() > max => {
+                log::warn!("media `{name}`: {} audio streams, keeping the first {max}", m.info.audio_streams.len());
+                m.info.audio_streams.truncate(max);
+            }
+            filmcraft_project::ItemKind::Sequence(sequence) => {
+                for clip in sequence.audio_tracks.iter_mut().flat_map(|t| t.items.iter_mut()) {
+                    if clip.audio_stream >= max {
+                        log::warn!("sequence `{name}`: clip `{}` uses audio stream {}, reset to 0", clip.name, clip.audio_stream);
+                        clip.audio_stream = 0;
+                    }
                 }
             }
+            _ => {}
         }
     }
     for item in loaded.project.sequences() {

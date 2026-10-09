@@ -64,17 +64,24 @@ fn legacy_audio_field_becomes_primary_stream_and_clip_defaults_to_zero() {
     assert_eq!(again.project.item(ItemId(5)).unwrap().as_media().unwrap().info.audio_streams, media.info.audio_streams);
 }
 
+/// Out-of-range audio stream data is repaired on load, never a reason to refuse the project.
 #[test]
-fn hostile_audio_stream_counts_and_indices_are_rejected() {
+fn hostile_audio_stream_counts_and_indices_are_repaired_not_rejected() {
     let mut p = decode(&fixture("v1-edit.fcproj")).unwrap().project;
     let seq = ItemId(21);
-    p.sequence_mut(seq).unwrap().audio_tracks[0].items[0].audio_stream = filmcraft_media::MAX_AUDIO_STREAMS;
-    assert!(matches!(decode(&encode(&p, false)), Err(FormatError::Corrupt(_))));
-    p.sequence_mut(seq).unwrap().audio_tracks[0].items[0].audio_stream = 0;
+    for bad in [filmcraft_media::MAX_AUDIO_STREAMS, usize::MAX] {
+        p.sequence_mut(seq).unwrap().audio_tracks[0].items[0].audio_stream = bad;
+        let loaded = decode(&encode(&p, false)).unwrap().project;
+        assert_eq!(loaded.sequence(seq).unwrap().audio_tracks[0].items[0].audio_stream, 0);
+    }
+    p.sequence_mut(seq).unwrap().audio_tracks[0].items[0].audio_stream = filmcraft_media::MAX_AUDIO_STREAMS - 1;
+    let loaded = decode(&encode(&p, false)).unwrap().project;
+    assert_eq!(loaded.sequence(seq).unwrap().audio_tracks[0].items[0].audio_stream, filmcraft_media::MAX_AUDIO_STREAMS - 1, "in range: kept");
     let media = p.item_mut(ItemId(5)).unwrap().as_media_mut().unwrap();
     let stream = media.info.audio_streams[0].clone();
     media.info.audio_streams.resize(filmcraft_media::MAX_AUDIO_STREAMS + 1, stream);
-    assert!(matches!(decode(&encode(&p, false)), Err(FormatError::Corrupt(_))));
+    let loaded = decode(&encode(&p, false)).unwrap().project;
+    assert_eq!(loaded.item(ItemId(5)).unwrap().as_media().unwrap().info.audio_streams.len(), filmcraft_media::MAX_AUDIO_STREAMS);
 }
 
 /// Schema 8 (before M3.10): no time interpolation / Hold Filters / Field Options / source channels
