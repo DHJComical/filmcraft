@@ -349,6 +349,29 @@ Software AV1 decodes 4K at 5.5 fps here, so it never plays in real time; with th
 plays without a drop. As on the other codecs, the hardware ignores draft mode and what is left on the
 CPU is the readback and plane conversion.
 
+## Results (Linux VA-API H.264 hardware decoding, Off → Auto)
+
+Same commit, Settings ▸ Playback ▸ Hardware decoding switched with the bench flag
+(`cargo xtask bench --sections decode --only dec_h --repeat 3 --hw off|auto`), 2026-10-08, Intel
+Core i5-13500H with Iris Xe graphics (Raptor Lake-P), 7.4 GB RAM, Intel iHD driver 26.1.2 through
+libva 2.22, load average 5–15. Only H.264 goes through VA-API so far; the HEVC rows decode in
+software either way and show the run-to-run spread. The decoded pictures are identical
+(bit-exact parity tests, `crates/platform/tests/vaapi.rs`).
+
+| codec | size | CPU ms/frame Off → **Auto** | fps Off → **Auto** (best of 3) | hw frames |
+|---|---|---|---|---|
+| H.264 | 1080p | 103.7 → **2.3** | 133 → **263** | 360 |
+| H.264 | 2160p | 416.5 → **11.4** | 32 → **56** | 216 |
+| HEVC | 1080p | 63.2 → 46.5 | 99 → 131 | 0 |
+| HEVC | 2160p | 349.5 → 353.7 | 30 → 35 | 0 |
+| HEVC Main 10 | 2160p | 348.9 → 352.6 | 29 → 29 | 0 |
+
+What is left on the CPU per H.264 frame is the host side of stateless decoding (parsing, DPB,
+filling the VA buffers) and the read-back: `vaGetImage` into an NV12 image and the copy into
+planar Y'CbCr. One picture is decoded at a time and read back as soon as the DPB outputs it, so
+4K throughput (56 fps) is bound by that round trip, not by the video engine; overlapping decode
+and read-back, or zero-copy into wgpu, would raise it.
+
 ## Results (GPU1: blend modes on the GPU compositor, #30, before → after)
 
 Before = this change with the old whole-frame CPU fallback for non-Normal blend modes put back
