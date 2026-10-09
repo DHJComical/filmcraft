@@ -1844,6 +1844,7 @@ dependencies = [
 name = "filmcraft-edit"
 version = "0.4.0"
 dependencies = [
+ "filmcraft-geom",
  "filmcraft-media",
  "filmcraft-project",
  "filmcraft-time",
@@ -2098,16 +2099,20 @@ dependencies = [
 name = "filmcraft-platform"
 version = "0.4.0"
 dependencies = [
+ "filmcraft-bitstream",
  "filmcraft-codecs",
  "filmcraft-color",
  "filmcraft-export",
  "filmcraft-frame",
+ "filmcraft-h264",
+ "filmcraft-hevc",
  "filmcraft-isobmff",
  "filmcraft-media",
  "filmcraft-project",
  "filmcraft-render",
  "filmcraft-testkit",
  "filmcraft-time",
+ "libloading",
  "log",
  "objc2-core-foundation",
  "objc2-core-media",
@@ -2203,6 +2208,7 @@ dependencies = [
  "skrifa",
  "unicode-bidi",
  "unicode-linebreak",
+ "unicode-segmentation",
 ]
 
 [[package]]
