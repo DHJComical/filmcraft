@@ -172,6 +172,17 @@ const SCREENSHOT_TIMEOUT_S: f64 = 10.0;
 /// timeline zoom animation finished) before capturing what is there.
 const SCREENSHOT_SETTLE_MAX_S: f64 = 5.0;
 
+/// File ▸ Export entries that run from the menus through the save panel: command, filter label,
+/// extension.
+pub(crate) const EXPORT_SAVE_DIALOGS: [(&str, &str, &str); 6] = [
+    ("file.exportEdl", "EDL", "edl"),
+    ("file.exportFcp7Xml", "Final Cut Pro XML", "xml"),
+    ("file.exportFcpxml", "FCPXML", "fcpxml"),
+    ("file.exportOtio", "OpenTimelineIO", "otio"),
+    ("file.exportAle", "Avid Log Exchange", "ale"),
+    ("file.exportSelectionProject", "FilmCraft Project", "fcproj"),
+];
+
 pub struct FilmcraftApp {
     pub session: Session,
     pub ui: UiState,
@@ -1007,8 +1018,38 @@ impl FilmcraftApp {
                 p["path"] = json!(path);
                 self.session.execute("captions.export", p).map_err(|e| e.to_string())
             }
-            _ => Err(format!("no dialog for {id}")),
+            _ => match EXPORT_SAVE_DIALOGS.iter().find(|(c, ..)| *c == id) {
+                Some(&(_, filter, ext)) => self.export_save_dialog(id, filter, ext, params),
+                None => Err(format!("no dialog for {id}")),
+            },
         }
+    }
+
+    /// File ▸ Export ▸ EDL…, Final Cut Pro XML… etc. from the menus (#382): ask where to save, then
+    /// run the command with that `path` and the rest of `params`.
+    fn export_save_dialog(&mut self, id: &str, filter: &str, ext: &str, params: &Value) -> Result<Value, String> {
+        filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&self.session))?;
+        let Some(pick) = self.hooks.pick_save_as.as_mut() else {
+            return Err("no save dialog available: run the command with a `path`".into());
+        };
+        // Timelines are named after the sequence; a selection must not suggest the open project's file.
+        let sequence = self.session.state.active_sequence.and_then(|s| self.session.project.item(s)).map(|i| i.name.clone());
+        let stem = match id {
+            "file.exportAle" => self.session.project.name.clone(),
+            "file.exportSelectionProject" => format!("{} selection", self.session.project.name),
+            _ => sequence.unwrap_or_else(|| self.session.project.name.clone()),
+        };
+        let stem: String = stem.chars().map(|c| if matches!(c, '/' | '\\') || c.is_control() { '-' } else { c }).collect();
+        let stem = if stem.trim().is_empty() { "Untitled".to_string() } else { stem };
+        let Some(path) = pick(filter, &[ext], &format!("{stem}.{ext}")) else { return Ok(Value::Null) };
+        let mut p = params.as_object().cloned().unwrap_or_default();
+        p.insert("path".into(), json!(path));
+        let r = self.session.execute(id, Value::Object(p)).map_err(|e| e.to_string());
+        self.ui.status = match &r {
+            Ok(_) => format!("Exported {path}"),
+            Err(e) => e.clone(),
+        };
+        r
     }
 
     /// Import dropped files.

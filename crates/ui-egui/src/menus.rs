@@ -310,6 +310,12 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
             filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session))?;
             return crate::panels::interchange_export::open(app, ctx, id);
         }
+        // File ▸ Export ▸ Media… opens the Export mode, like ⌘M (#382); with a path it exports directly.
+        "file.exportMedia" if params.get("path").is_none() => {
+            filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session))?;
+            app.ui.mode = Mode::Export;
+            return Ok(json!({"mode": "export"}));
+        }
         // Audio Gain from the menu or G opens the dialog; with params it applies directly.
         "clip.audioGain" if params.as_object().is_none_or(|m| m.is_empty()) => {
             filmcraft_engine::find_command("clip.audioGain").map_or(Ok(()), |c| (c.enabled)(&app.session))?;
@@ -388,6 +394,7 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
         || (id == "file.save" && params.get("path").is_none() && app.session.path.is_none())
         || (matches!(id, "captions.import" | "captions.export") && params.get("path").is_none())
         || (id == "graphics.newFromFile" && params.get("path").is_none())
+        || (crate::EXPORT_SAVE_DIALOGS.iter().any(|(c, ..)| *c == id) && params.get("path").is_none())
     {
         return app.file_dialog(id, &params);
     }
