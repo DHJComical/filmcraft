@@ -129,7 +129,7 @@ pub fn apply_preset(app: &mut FilmcraftApp, name: &str) -> bool {
 /// Full output path of the current settings.
 pub fn output_path(ex: &ExportUi) -> String {
     let name = if ex.file_name.trim().is_empty() { "Export" } else { ex.file_name.trim() };
-    let dir = expand_home(ex.location.trim());
+    let dir = filmcraft_engine::export_tools::expand_home(ex.location.trim());
     let file = format!("{name}.{}", ex.settings.extension());
     if dir.is_empty() { file } else { std::path::Path::new(&dir).join(file).to_string_lossy().to_string() }
 }
@@ -602,6 +602,11 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
             if let Some(i) = combo(ui, reg, "export.video.mxfCodec", s.mxf_video_codec.label(), &labels, 180.0) {
                 s.mxf_video_codec = MxfVideoCodec::ALL[i];
             }
+        });
+    }
+    if matches!(s.format, Format::PngSequence | Format::TiffSequence) {
+        row(ui, t, "Alpha", |ui| {
+            check(ui, reg, "export.video.alpha", &mut s.alpha, "Include Alpha Channel");
         });
     }
     match s.video_format() {
@@ -1310,11 +1315,4 @@ fn list_row(ui: &mut egui::Ui, t: &Tokens, selected: bool, text: &str, width: f3
     ui.painter().rect_filled(r, 3.0, bg);
     ui.painter().text(pos2(r.min.x + 6.0, r.center().y), Align2::LEFT_CENTER, text, Tokens::ui(12.5), if selected { Color32::WHITE } else { t.text });
     resp
-}
-
-fn expand_home(p: &str) -> String {
-    match (p.strip_prefix("~/"), std::env::var("HOME")) {
-        (Some(rest), Ok(h)) => format!("{h}/{rest}"),
-        _ => p.to_string(),
-    }
 }

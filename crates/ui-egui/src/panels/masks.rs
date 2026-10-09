@@ -363,9 +363,11 @@ pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, fra
         let selected = sel_v == Some(i);
         painter.rect_filled(vr, 0.0, if selected { col } else { Color32::WHITE });
         painter.rect_stroke(vr, 0.0, Stroke::new(1.0, col), egui::StrokeKind::Middle);
-        let r = ui
-            .interact(vr.expand(3.0), egui::Id::new(("mask-vertex", i)), Sense::click_and_drag())
-            .on_hover_text(tl!("Drag: move · Alt-click: smooth/corner · Cmd-click: delete"));
+        let r = ui.interact(vr.expand(3.0), egui::Id::new(("mask-vertex", i)), Sense::click_and_drag()).on_hover_text(if cfg!(target_os = "macos") {
+            tl!("Drag: move · Alt-click: smooth/corner · Cmd-click: delete")
+        } else {
+            tl!("Drag: move · Alt-click: smooth/corner · Ctrl-click: delete")
+        });
         app.auto.add(&format!("program.mask.vertex.{i}"), vr, "Mask vertex");
         if r.drag_started() {
             ui.data_mut(|d| d.insert_temp(sel_v_id, i));

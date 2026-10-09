@@ -3430,3 +3430,8 @@
 	Select All Project Items	Seleccionar todos los elementos del proyecto
 	Username	Nombre de usuario
 	Vertical Type Tool	Herramienta Texto vertical
+	Go to previous keyframe	Ir al fotograma clave anterior
+	Go to next keyframe	Ir al fotograma clave siguiente
+	Add keyframe	Añadir fotograma clave
+	Remove keyframe	Quitar fotograma clave
+	Turn on animation and add keyframe	Activar la animación y añadir un fotograma clave

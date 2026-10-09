@@ -3,7 +3,9 @@
 //! Frames come from the background [`FrameServer`](crate::frames::FrameServer) at the *smaller* of
 //! the playback resolution and the on-screen resolution (so a small monitor never pays for 4K).
 //! While playing we prefetch the next frames in priority order; while scrubbing the exact frame is
-//! requested first and the nearest cached frame is shown until it arrives (no black flashes).
+//! requested first and the nearest cached frame is shown until it arrives (no black flashes), or
+//! failing that the frame asked for a refresh earlier, so the picture follows a scrub or a value
+//! that is dragged instead of waiting for the mouse to rest.
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use filmcraft_project::ItemKind;
@@ -175,18 +177,26 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
         } else {
             app.frames.request(key, rate.tick_of(frame), scale, &project, 0);
         }
+        let asked = asked_before(app, prefix, key, playing);
         let tex_name = if channel { format!("monitor-{prefix}-{display:?}") } else { format!("monitor-{prefix}") };
-        let (shown, exact) = if use_gpu {
-            let exact = app.frames.get_plan(&key).map(|p| (key, p));
-            let is_exact = exact.is_some();
-            let tex = match exact.or_else(|| app.frames.nearest_plan(key, 6)) {
-                Some((k, plan)) => app.gpu_present(k, &plan).map(|(id, _)| id),
-                None => app.gpu.as_ref().and_then(|g| g.texture),
-            };
-            (tex, is_exact)
+        let (shown, on_screen) = if use_gpu {
+            let found = app
+                .frames
+                .get_plan(&key)
+                .map(|p| (key, p))
+                .or_else(|| app.frames.nearest_plan(key, 6))
+                .or_else(|| asked.iter().find_map(|k| app.frames.get_plan(k).map(|p| (*k, p))));
+            match found {
+                Some((k, plan)) => (app.gpu_present(k, &plan).map(|(id, _)| id), Some(k)),
+                None => (app.gpu.as_ref().and_then(|g| g.texture), app.gpu.as_ref().and_then(|g| g.last_key)),
+            }
         } else {
-            cpu_texture(app, &ctx, &tex_name, key, display)
+            cpu_texture(app, &ctx, &tex_name, key, &asked, display)
         };
+        let exact = on_screen == Some(key);
+        if which == Which::Program {
+            app.program_shown = on_screen;
+        }
         if !playing && !exact {
             app.monitor_inexact = true;
         }
@@ -207,7 +217,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
             app.frames.request(rkey, rate.tick_of(rf), scale, &project, 1);
             let rpic = fit(ra, frame_size.0 as f32, frame_size.1 as f32);
             ui.painter().rect_filled(rpic, 0.0, t.monitor_bg);
-            if let (Some(tex), _) = cpu_texture(app, &ctx, &format!("monitor-{prefix}-ref"), rkey, DisplayMode::Composite) {
+            if let (Some(tex), _) = cpu_texture(app, &ctx, &format!("monitor-{prefix}-ref"), rkey, &[], DisplayMode::Composite) {
                 ui.painter().image(tex, rpic, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
             }
             app.auto.add("program.compare.reference", rpic, "reference frame");
@@ -351,20 +361,63 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     transport(app, ui, row3, which);
 }
 
-/// A monitor texture from the CPU frame path: the exact frame, else the nearest cached one, with
-/// the display mode's channel mapping. Returns (texture, exact).
-fn cpu_texture(app: &mut FilmcraftApp, ctx: &egui::Context, name: &str, key: FrameKey, mode: DisplayMode) -> (Option<egui::TextureId>, bool) {
-    let upload = |app: &mut FilmcraftApp, k: FrameKey, img: &crate::frames::Rgba| {
-        if mode.is_channel() { app.texture_for_mapped(ctx, name, k, img, |i| monitor_view::channel_view(i, mode)) } else { app.texture_for(ctx, name, k, img) }
-    };
-    if let Some(img) = app.frames.get(&key) {
-        return (Some(upload(app, key, &img)), true);
+/// How many of a paused monitor's latest requests are remembered ([`asked_before`]): about a
+/// second of refreshes, so a frame that took several refreshes to render is still known when it
+/// is ready.
+const ASKED_KEYS: usize = 64;
+
+/// Note that the monitor `prefix` asks for `key`, and return the frames it asked for on the passes
+/// before, newest first: the stand-ins for `key` while it renders.
+///
+/// A value that is dragged asks for a new revision on every pass, and a scrub for a new frame, so
+/// the frame asked for is never the one that is ready; the one asked for a pass earlier usually
+/// is, and showing it keeps the picture one pass behind the mouse instead of frozen until the
+/// mouse rests. Playback has its own schedule and remembers nothing (what was on screen before
+/// Play is no stand-in for where it stopped).
+fn asked_before(app: &mut FilmcraftApp, prefix: &str, key: FrameKey, playing: bool) -> Vec<FrameKey> {
+    let asked = app.monitor_asked.entry(prefix.to_string()).or_default();
+    if playing {
+        asked.clear();
+        return Vec::new();
     }
-    let tex = match app.frames.nearest(key.target, key.frame, key.size, key.revision, 6) {
-        Some(img) => Some(upload(app, FrameKey { frame: key.frame - 1, ..key }, &img)),
-        None => app.texture_existing(name).map(|(id, _)| id),
-    };
-    (tex, false)
+    // another sequence or clip: its pictures are not this one's
+    asked.retain(|k| k.target == key.target && *k != key);
+    let before: Vec<FrameKey> = asked.iter().rev().copied().collect();
+    asked.push_back(key);
+    while asked.len() > ASKED_KEYS {
+        asked.pop_front();
+    }
+    before
+}
+
+/// A monitor texture from the CPU frame path: the exact frame, else the nearest cached one before
+/// it, else the newest ready one of `asked` (see [`asked_before`]), with the display mode's
+/// channel mapping. Returns the texture and the frame it shows.
+fn cpu_texture(
+    app: &mut FilmcraftApp,
+    ctx: &egui::Context,
+    name: &str,
+    key: FrameKey,
+    asked: &[FrameKey],
+    mode: DisplayMode,
+) -> (Option<egui::TextureId>, Option<FrameKey>) {
+    let found = app
+        .frames
+        .get(&key)
+        .map(|img| (key, img))
+        .or_else(|| (1..=6).map(|d| FrameKey { frame: key.frame.saturating_sub(d), ..key }).find_map(|k| app.frames.get(&k).map(|img| (k, img))))
+        .or_else(|| asked.iter().find_map(|k| app.frames.get(k).map(|img| (*k, img))));
+    match found {
+        Some((k, img)) => {
+            let tex = if mode.is_channel() {
+                app.texture_for_mapped(ctx, name, k, &img, |i| monitor_view::channel_view(i, mode))
+            } else {
+                app.texture_for(ctx, name, k, &img)
+            };
+            (Some(tex), Some(k))
+        }
+        None => (app.texture_existing(name).map(|(id, _)| id), app.texture_key(name)),
+    }
 }
 
 pub fn quantize_scale(s: f32) -> f32 {

@@ -608,10 +608,8 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
 fn finish(d: &ClipDialogDraft) -> Value {
     let mut p = d.params.clone();
     match d.command.as_str() {
-        "file.newOfflineFile" => {
-            if p["name"].as_str().is_some_and(str::is_empty) {
-                p.as_object_mut().map(|m| m.remove("name"));
-            }
+        "file.newOfflineFile" if p["name"].as_str().is_some_and(str::is_empty) => {
+            p.as_object_mut().map(|m| m.remove("name"));
         }
         "clip.modifyTimecode" if p["reset"].as_bool() == Some(true) => {
             p.as_object_mut().map(|m| m.remove("timecode"));
