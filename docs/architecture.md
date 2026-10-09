@@ -450,7 +450,7 @@ Clip ▸ Remix ▸ Enable Remix / Remix Properties… / Revert Remix (`clip.remi
 
 ```text
 clip.essential (type + settings)  ──apply()──►  clip effects marked `essential`, clip gain, Volume, Panner
-essentialSound.autoMatch   BS.1770 integrated loudness of render::audio::clip_signal → match gain (clip gain)
+essentialSound.autoMatch   BS.1770 integrated loudness of render::audio::clip_signal (mono clips as one channel) → match gain (clip gain)
 essentialSound.generateDucking   trigger clips' summed level (10 ms hops) → activity regions → Volume keyframes
 ```
 
