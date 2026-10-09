@@ -5,6 +5,14 @@
 //! printing `sizeof` / `alignof` / `offsetof` of the structures of `src/nvenc/ffi.rs`, the constants
 //! and GUIDs it uses and, for the bit-fields of the `flags` words (`offsetof` cannot take those), the
 //! word with that one field set (see docs/testing.md). H.264 and HEVC are both covered.
+//!
+//! The expectations were generated with MSVC (Windows x64, LLP64) and also hold on Linux x86_64
+//! (LP64), where these tests run too: every field the structures use is a fixed-width integer
+//! (`uint32_t`, `int32_t`, `uint64_t`, ...), `int` / an enum (32 bits on both), a pointer (64 bits on
+//! both) or a GUID (four fixed-width members, 16 bytes, aligned to 4). None is a `long` /
+//! `unsigned long`, the one C type whose size differs between the two (32 bits on Windows, 64 on
+//! Linux). The `flags` bit-fields are all `uint32_t` fields of one `uint32_t` word, which MSVC and
+//! GCC / Clang lay out the same way (from the least significant bit) on x86_64.
 #![allow(clippy::unreadable_literal)]
 
 use super::ffi::*;
