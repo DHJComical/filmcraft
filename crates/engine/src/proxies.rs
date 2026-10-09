@@ -200,7 +200,7 @@ pub fn start_job(s: &mut Session, label: String, work: Vec<(ItemId, String, &'st
     let outputs: Arc<Mutex<Vec<(ItemId, String)>>> = Arc::default();
     let (prog, res, outs) = (job.progress.clone(), job.result.clone(), outputs.clone());
     let run = move || {
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
         let mut bytes = 0;
         let mut err = None;
         let n = tasks.len();

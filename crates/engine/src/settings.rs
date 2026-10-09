@@ -955,7 +955,7 @@ static CATEGORIES: &[Category] = &[
             b("playback.draftDecode", "Draft decoding at reduced playback resolution (H.264: faster, some frames less filtered)", true),
             f("playback.hardwareDecoding", "Hardware decoding", Kind::Choice(HW_DECODE), true),
             Row::Note(
-                "Hardware decoding: Auto uses the system's video decoder (VideoToolbox on macOS) for the H.264 and HEVC streams it supports, and FilmCraft's own decoder for everything else or if the hardware fails. Media that is already open keeps its decoder until it is reopened.",
+                "Hardware decoding: Auto uses the system's video decoder (VideoToolbox on macOS, Media Foundation on Windows, VA-API for H.264 and HEVC on Linux) for the streams it supports, and FilmCraft's own decoder for everything else or if the hardware fails. Media that is already open keeps its decoder until it is reopened.",
             ),
         ],
     },
@@ -1084,10 +1084,8 @@ pub fn sanitize(v: &mut Value, defaults: &Value) {
         let Some(slot) = path.iter().try_fold(&mut *v, |v, k| v.get_mut(*k)) else { continue };
         let def = path.iter().try_fold(defaults, |v, k| v.get(*k)).cloned().unwrap_or(Value::Null);
         match f.kind {
-            Kind::Choice(_) | Kind::Color => {
-                if validate(f.key, slot).is_err() {
-                    *slot = def;
-                }
+            Kind::Choice(_) | Kind::Color if validate(f.key, slot).is_err() => {
+                *slot = def;
             }
             Kind::Int { min, max, .. } => match slot.as_f64().filter(|x| x.is_finite()) {
                 Some(x) => *slot = json!(x.round().clamp(min, max) as u64),
