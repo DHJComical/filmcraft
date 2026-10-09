@@ -220,3 +220,21 @@ fn ctrl_chords_fire_shortcuts_off_macos() {
     d.key("Z");
     assert_eq!(start_of(&mut d), start);
 }
+
+#[test]
+fn delete_key_clears_the_selected_timeline_clip() {
+    // #243: on Windows and Linux keyboards Delete is the forward-delete key; with the Timeline
+    // focused it ran Project ▸ Clear (nothing selected there), so the clip stayed.
+    let mut d = Driver::new();
+    let items = |d: &mut Driver| d.exec("sequence.inspect", json!({}))["video"][0]["items"].as_array().unwrap().clone();
+    let second = items(&mut d)[1].clone();
+    let (clip, start) = (second["clip"].as_u64().unwrap(), second["start"].as_i64().unwrap());
+    d.exec("playhead.set", json!({"time": start + 1_000_000_000}));
+    d.focus("Timeline");
+    d.key("D");
+    assert!(d.app().session.state.selection.iter().any(|c| c.0 == clip), "D selects the clip under the playhead");
+    d.key("Delete");
+    assert!(!items(&mut d).iter().any(|i| i["clip"].as_u64() == Some(clip)), "Delete removed the selected clip");
+    d.key("Cmd+Z");
+    assert!(items(&mut d).iter().any(|i| i["clip"].as_u64() == Some(clip)), "and undo brings it back");
+}
