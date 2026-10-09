@@ -967,6 +967,11 @@ impl FilmcraftApp {
 
     // ---------------------------------------------------------------- files
 
+    /// Destination of imports started from the currently shown Project panel view.
+    pub fn import_bin(&self) -> filmcraft_project::BinId {
+        panels::project::view_of(self, panels::project::shown_inst(self)).bin
+    }
+
     pub fn file_dialog(&mut self, id: &str, params: &Value) -> Result<Value, String> {
         match id {
             "file.import" => {
@@ -981,7 +986,8 @@ impl FilmcraftApp {
                 if paths.is_empty() {
                     return Ok(Value::Null);
                 }
-                let r = self.session.execute("file.import", json!({"paths": paths})).map_err(|e| e.to_string());
+                let bin = params.get("bin").cloned().unwrap_or_else(|| json!(self.import_bin().0));
+                let r = self.session.execute("file.import", json!({"paths": paths, "bin": bin})).map_err(|e| e.to_string());
                 if let Ok(v) = &r
                     && let Some(errs) = v.get("errors").and_then(Value::as_array)
                     && !errs.is_empty()
@@ -1081,7 +1087,7 @@ impl FilmcraftApp {
             }
         }
         if !paths.is_empty() {
-            let _ = self.session.execute("file.import", json!({"paths": paths}));
+            let _ = self.session.execute("file.import", json!({"paths": paths, "bin": self.import_bin().0}));
         }
     }
 
