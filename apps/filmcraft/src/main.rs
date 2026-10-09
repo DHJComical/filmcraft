@@ -224,6 +224,8 @@ fn main() -> eframe::Result {
                     .map(|p| p.to_string_lossy().to_string())
             }));
             app.hooks.pick_folder = Some(Box::new(|| rfd::FileDialog::new().pick_folder().map(|p| p.to_string_lossy().to_string())));
+            app.hooks.pick_folder_at =
+                Some(Box::new(|dir: &str| rfd::FileDialog::new().set_directory(dir).pick_folder().map(|p| p.to_string_lossy().into_owned())));
             app.hooks.open_path = Some(Box::new(open_path));
             // Settings ▸ General ▸ Interface Language ▸ System Language (#218).
             app.hooks.system_languages = Some(Box::new(|| sys_locale::get_locales().collect()));

@@ -1109,5 +1109,8 @@ mod voiceover_tests;
 
 #[cfg(test)]
 mod source_placement_tests;
+
+#[cfg(test)]
+mod frame_export_tests;
 #[cfg(test)]
 mod wasm_clock_tests;

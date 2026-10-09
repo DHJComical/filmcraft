@@ -194,6 +194,15 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
         ctx.request_repaint();
         return Ok(json!(app.ui.language));
     }
+    if id == "file.exportFrame" {
+        if params.get("target").is_none() {
+            let source = targets_source(app, &params);
+            params.as_object_mut().ok_or("command parameters must be an object")?.insert("target".into(), json!(if source { "source" } else { "program" }));
+        }
+        if params.get("path").is_none() {
+            return crate::panels::frame_export::open(app, ctx, &params);
+        }
+    }
     if id == "perf.stats" {
         // the engine's counters plus playback, frame workers and UI timings
         return Ok(crate::perf::stats(app));

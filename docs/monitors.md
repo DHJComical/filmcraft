@@ -120,3 +120,33 @@ playhead-blue color and translucent gray band. Runtime review remains Windows-on
 The playhead has drag priority above the range band and trim handles, including a full-span
 selection. Drag it to scrub; the unoccupied upper ruler can also scrub. Drag the gray band away
 from the playhead to translate the marked range.
+
+## Export Frame
+
+The camera button in either monitor opens Export Frame. Drag its white header to move the dialog.
+The suggested name is the source filename without its extension, or the sequence name, without an added `.Still` suffix. Choose a name, format and depth,
+use Browse to choose the destination folder (or edit Path), and click OK. Existing files require
+an explicit Replace confirmation. Cancel, the header close button, Escape, and clicking outside
+the dialog (including the top menus or mode tabs) dismiss it without writing anything.
+The dialog's own dropdowns and Browse button keep it open. The white
+header and dark body use original generic controls. Source details and frame time appear below
+the settings. Frame time uses the same hours/minutes/seconds/frames timecode as its monitor,
+including the Program sequence's drop-frame setting, and stays captured while the dialog is open.
+The last successful folder is reused during the current app session.
+
+PNG and TIFF support 8 or 16 bits per channel. The 16-bit path quantizes directly from the
+float image, preserving precision beyond 8 bits. JPEG (quality 95) and BMP support 8-bit output;
+choosing either resets Depth to 8 Bit and disables 16 Bit. The command rejects unsupported
+format/depth combinations. In the browser the still is offered as a download. Import into project
+adds the saved still as one undoable edit. Failed writes retain the settings and report an error.
+
+The monitor, item and frame time are captured when the settings open. Export uses the original
+full-resolution media, even with proxies or reduced preview resolution enabled. Source exports
+the source picture at its media playhead; Program exports the sequence composite, effects and
+captions at its timeline playhead. Audio-only Source clips have no picture to export.
+
+The shared `file.exportFrame` command accepts `target: "source" | "program"` (Program by default),
+`format: "png" | "jpeg" | "tiff" | "bmp"`, `depth: 8 | 16` (default 8),
+optional `item` for Source or `sequence` for Program, and an exact integer `time` in ticks.
+Supplying `path` executes directly; invoking it through the UI without a path opens settings,
+routed to the focused monitor unless an explicit monitor/target is provided.

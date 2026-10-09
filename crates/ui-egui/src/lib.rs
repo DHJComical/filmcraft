@@ -116,6 +116,8 @@ pub struct HostHooks {
     pub pick_open_file: Option<Box<dyn FnMut(&str, &[&str]) -> Option<String>>>,
     /// Folder picker (Link Media search, proxy and Project Manager destinations).
     pub pick_folder: Option<Box<dyn FnMut() -> Option<String>>>,
+    /// Folder picker starting at the current destination (Export Frame).
+    pub pick_folder_at: Option<Box<dyn FnMut(&str) -> Option<String>>>,
     /// Pick one file for a command that relinks to it (Link Media ▸ Locate…, Attach Proxies,
     /// Reconnect Full Resolution) instead of importing it, as [`Self::pick_files`] does. Native
     /// hosts return the path. A host whose picker is asynchronous (the web) returns `None` and

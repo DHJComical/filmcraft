@@ -600,7 +600,7 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
             (Icon::GoToOut, "src.goOut", tl!("Go to Out (Shift+O)")),
             (Icon::Insert, "source.insert", tl!("Insert (,)")),
             (Icon::Overwrite, "source.overwrite", tl!("Overwrite (.)")),
-            (Icon::Camera, "exportFrame", tl!("Export Frame (Shift+E)")),
+            (Icon::Camera, "exportFrame", tl!("Export Frame")),
             (Icon::Proxy, "media.toggleProxies", tl!("Toggle Proxies")),
         ]
     } else {
@@ -615,7 +615,7 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
             (Icon::GoToOut, "markers.goToOut", tl!("Go to Out (Shift+O)")),
             (Icon::Lift, "sequence.lift", tl!("Lift (;)")),
             (Icon::Extract, "sequence.extract", tl!("Extract (')")),
-            (Icon::Camera, "exportFrame", tl!("Export Frame (Shift+E)")),
+            (Icon::Camera, "exportFrame", tl!("Export Frame")),
             (Icon::Proxy, "media.toggleProxies", tl!("Toggle Proxies")),
         ]
     };
@@ -651,10 +651,7 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
                     Ok(serde_json::Value::Null)
                 }
 
-                "exportFrame" => {
-                    app.ui.status = tl!("Export Frame: use Export mode (M6)").into();
-                    Ok(serde_json::Value::Null)
-                }
+                "exportFrame" => crate::menus::invoke(app, &ctx, "file.exportFrame", json!({"monitor": if src { "source" } else { "program" }})),
                 c => crate::menus::invoke(app, &ctx, c, json!({"monitor": if src { "source" } else { "program" }})),
             };
             if let Err(e) = r {
