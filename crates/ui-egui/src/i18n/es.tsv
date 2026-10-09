@@ -1808,7 +1808,7 @@
 	Hard Limiter	Limitador duro
 	Hard Mix	Mezcla definida
 	Hardware decoding	Descodificación por hardware
-	Hardware decoding: Auto uses the system's video decoder (VideoToolbox on macOS) for the H.264 and HEVC streams it supports, and FilmCraft's own decoder for everything else or if the hardware fails. Media that is already open keeps its decoder until it is reopened.	Descodificación por hardware: Automático usa el descodificador de video del sistema (VideoToolbox en macOS) para los flujos H.264 y HEVC que admite, y el descodificador propio de FilmCraft para todo lo demás o si falla el hardware. Los medios ya abiertos mantienen su descodificador hasta que se vuelven a abrir.
+	Hardware decoding: Auto uses the system's video decoder (VideoToolbox on macOS, Media Foundation on Windows, VA-API for H.264 and HEVC on Linux) for the streams it supports, and FilmCraft's own decoder for everything else or if the hardware fails. Media that is already open keeps its decoder until it is reopened.	Descodificación por hardware: Automático usa el descodificador de video del sistema (VideoToolbox en macOS, Media Foundation en Windows, VA-API para H.264 y HEVC en Linux) para los flujos que admite, y el descodificador propio de FilmCraft para todo lo demás o si falla el hardware. Los medios ya abiertos mantienen su descodificador hasta que se vuelven a abrir.
 	Head Size	Tamaño de la cabeza
 	Heart	Corazón
 	Height	Altura
@@ -3435,3 +3435,39 @@
 	Add keyframe	Añadir fotograma clave
 	Remove keyframe	Quitar fotograma clave
 	Turn on animation and add keyframe	Activar la animación y añadir un fotograma clave
+	Click to select, or click in empty space and drag to marquee select. Use Shift, Alt, and Ctrl for other options.	Haz clic para seleccionar, o haz clic en un espacio vacío y arrastra para seleccionar con un marco. Usa Mayús, Alt y Ctrl para otras opciones.
+	Click to zoom in; Alt-click to zoom out.	Haz clic para acercar; Alt+clic para alejar.
+	Drag: move · Alt-click: smooth/corner · Ctrl-click: delete	Arrastrar: mover · Alt+clic: suave/esquina · Ctrl+clic: eliminar
+	Include Alpha Channel	Incluir canal alfa
+	Sequence Settings	Ajustes de secuencia
+	Color Management	Gestión del color
+	VR Properties	Propiedades de RV
+	Editing Mode:	Modo de edición:
+	Timebase:	Base de tiempo:
+	Frame Size:	Tamaño del fotograma:
+	Pixel Aspect Ratio:	Proporción de aspecto de píxeles:
+	Fields:	Campos:
+	Channel Format:	Formato de canales:
+	Number of Channels:	Número de canales:
+	Preview File Format:	Formato de archivo de previsualización:
+	Working Color Space:	Espacio de color de trabajo:
+	Projection:	Proyección:
+	Layout:	Disposición:
+	Captured View:	Vista capturada:
+	Video Previews	Previsualizaciones de video
+	No Fields (Progressive Scan)	Sin campos (exploración progresiva)
+	Custom ({ratio})	Personalizado ({ratio})
+	{rate} frames/second	{rate} fotogramas/segundo
+	{rate} fps Drop-Frame Timecode	Código de tiempo con omisión de fotogramas a {rate} fps
+	{rate} fps Non Drop-Frame Timecode	Código de tiempo sin omisión de fotogramas a {rate} fps
+	{rate} fps Timecode	Código de tiempo a {rate} fps
+	horizontal	horizontal
+	vertical	vertical
+	Scale motion effects proportionally when changing frame size	Escalar los efectos de movimiento proporcionalmente al cambiar el tamaño del fotograma
+	Maximum Bit Depth	Profundidad de bits máxima
+	Maximum Render Quality	Calidad de procesamiento máxima
+	Composite in Linear Color	Componer en color lineal
+	Auto Tone Map Media (HDR and log into SDR)	Mapeo de tonos automático de medios (HDR y log a SDR)
+	Configure…	Configurar…
+	Not supported in FilmCraft yet	FilmCraft aún no lo admite
+	FilmCraft always composites in linear light	FilmCraft siempre compone en luz lineal

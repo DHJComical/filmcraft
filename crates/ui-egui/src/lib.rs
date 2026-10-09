@@ -1119,7 +1119,7 @@ impl FilmcraftApp {
         p.insert("path".into(), json!(path));
         let r = self.session.execute(id, Value::Object(p)).map_err(|e| e.to_string());
         self.ui.status = match &r {
-            Ok(_) => format!("Exported {path}"),
+            Ok(_) => tlf!("Exported {path}", path),
             Err(e) => e.clone(),
         };
         r
@@ -1453,7 +1453,9 @@ impl FilmcraftApp {
     fn hint_text(&self) -> String {
         let mac = cfg!(target_os = "macos");
         match self.ui.tool {
-            state::Tool::Selection if mac => tl!("Click to select, or click in empty space and drag to marquee select. Use Shift, Opt, and Cmd for other options."),
+            state::Tool::Selection if mac => {
+                tl!("Click to select, or click in empty space and drag to marquee select. Use Shift, Opt, and Cmd for other options.")
+            }
             state::Tool::Selection => tl!("Click to select, or click in empty space and drag to marquee select. Use Shift, Alt, and Ctrl for other options."),
             state::Tool::TrackSelectForward => tl!("Click to select all clips to the right in all tracks. Shift-click for a single track."),
             state::Tool::TrackSelectBackward => tl!("Click to select all clips to the left in all tracks. Shift-click for a single track."),
