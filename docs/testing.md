@@ -340,8 +340,10 @@ real-time second (≈160 ms CPU per frame at 170 Mbit/s); the demo project's pro
 
 ### Audio mixer throughput
 
+`perf_24_tracks_3_effects_realtime_factor` (24 tracks, 72 inserts and a compressed submix on one
+core) must run at least 4x realtime in release builds (1x in debug). On Unix it times the test
+thread's CPU time, so it runs with the rest of the suite. Hosts without a per-thread CPU clock
+(Windows) fall back to wall time, which depends on load, so there it is ignored by default; run it
+explicitly with
 `cargo test --release -p filmcraft-render --lib perf_24_tracks_3_effects_realtime_factor -- --ignored --nocapture`
-runs the 24-track, 72-insert throughput benchmark. It retains the 4x realtime release target, but
-is opt-in like the other hardware benchmarks: portable functional CI must not depend on a host's
-single-core throughput or scheduling. The mixer correctness tests remain enabled. On non-Unix
-hosts its existing timer falls back to wall time; record that limitation with the machine and result.
+and record the machine with the result.
