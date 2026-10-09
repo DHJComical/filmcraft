@@ -1843,6 +1843,7 @@ dependencies = [
 name = "filmcraft-edit"
 version = "0.4.0"
 dependencies = [
+ "filmcraft-geom",
  "filmcraft-media",
  "filmcraft-project",
  "filmcraft-time",
