@@ -72,6 +72,8 @@ pub const NV_ENC_ERR_LOCK_BUSY: NvStatus = 13;
 pub const NV_ENC_DEVICE_TYPE_DIRECTX: u32 = 0;
 pub const NV_ENC_MEMORY_HEAP_SYSMEM_CACHED: u32 = 2;
 pub const NV_ENC_BUFFER_FORMAT_NV12: u32 = 0x1;
+/// P010: 10-bit 4:2:0, 16-bit little-endian samples with the value in the high 10 bits.
+pub const NV_ENC_BUFFER_FORMAT_YUV420_10BIT: u32 = 0x10000;
 pub const NV_ENC_PARAMS_RC_VBR: u32 = 1;
 pub const NV_ENC_PARAMS_RC_CBR: u32 = 2;
 pub const NV_ENC_TUNING_INFO_HIGH_QUALITY: u32 = 1;
@@ -103,10 +105,15 @@ pub const NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED: u32 = 5;
 pub const NV_ENC_VUI_COLOR_PRIMARIES_BT709: u32 = 1;
 pub const NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709: u32 = 1;
 pub const NV_ENC_VUI_MATRIX_COEFFS_BT709: u32 = 1;
+pub const NV_ENC_VUI_COLOR_PRIMARIES_BT2020: u32 = 9;
+pub const NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE2084: u32 = 16;
+pub const NV_ENC_VUI_TRANSFER_CHARACTERISTIC_ARIB_STD_B67: u32 = 18;
+pub const NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL: u32 = 9;
 
 /// `NV_ENC_CAPS` values (the enum counts from zero in the header's order).
 pub const NV_ENC_CAPS_NUM_MAX_BFRAMES: u32 = 0;
 pub const NV_ENC_CAPS_SUPPORTED_RATECONTROL_MODES: u32 = 1;
+pub const NV_ENC_CAPS_SUPPORT_10BIT_ENCODE: u32 = 39;
 pub const NV_ENC_CAPS_WIDTH_MAX: u32 = 16;
 pub const NV_ENC_CAPS_HEIGHT_MAX: u32 = 17;
 pub const NV_ENC_CAPS_WIDTH_MIN: u32 = 45;
@@ -118,6 +125,7 @@ pub const NV_ENC_H264_PROFILE_BASELINE_GUID: GUID = GUID::from_values(0x0727bcaa
 pub const NV_ENC_H264_PROFILE_MAIN_GUID: GUID = GUID::from_values(0x60b5c1d4, 0x67fe, 0x4790, [0x94, 0xd5, 0xc4, 0x72, 0x6d, 0x7b, 0x6e, 0x6d]);
 pub const NV_ENC_H264_PROFILE_HIGH_GUID: GUID = GUID::from_values(0xe7cbc309, 0x4f7a, 0x4b89, [0xaf, 0x2a, 0xd5, 0x37, 0xc9, 0x2b, 0xe3, 0x10]);
 pub const NV_ENC_HEVC_PROFILE_MAIN_GUID: GUID = GUID::from_values(0xb514c39a, 0xb55b, 0x40fa, [0x87, 0x8f, 0xf1, 0x25, 0x3b, 0x4d, 0xfd, 0xec]);
+pub const NV_ENC_HEVC_PROFILE_MAIN10_GUID: GUID = GUID::from_values(0xfa4d2b6c, 0x3a5b, 0x411a, [0x80, 0x18, 0x0a, 0x3f, 0x5e, 0x3c, 0x9b, 0xe5]);
 pub const NV_ENC_PRESET_P4_GUID: GUID = GUID::from_values(0x90a7b826, 0xdf06, 0x4862, [0xb9, 0xd2, 0xcd, 0x6d, 0x73, 0xa0, 0x86, 0x81]);
 pub const NV_ENC_PRESET_P5_GUID: GUID = GUID::from_values(0x21c6e6b4, 0x297a, 0x4cba, [0x99, 0x8f, 0xb6, 0xcb, 0xde, 0x72, 0xad, 0xe3]);
 
@@ -401,10 +409,62 @@ pub struct NV_ENC_CREATE_BITSTREAM_BUFFER {
     pub reserved2: [*mut c_void; 64],
 }
 
-/// `NV_ENC_CODEC_PIC_PARAMS`: a union of codec structures, all zero here (defaults).
+/// `NV_ENC_SEI_PAYLOAD`: a user SEI message (payload type and bytes) for a picture.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct NV_ENC_CODEC_PIC_PARAMS {
+pub struct NV_ENC_SEI_PAYLOAD {
+    pub payloadSize: u32,
+    pub payloadType: u32,
+    pub payload: *mut u8,
+}
+
+/// `NV_ENC_CLOCK_TIMESTAMP_SET`: countingType:1, discontinuityFlag:1, cntDroppedFrames:1, nFrames:8,
+/// secondsValue:6, minutesValue:6, hoursValue:5, reserved2:4 in `bits`, then the time offset.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NV_ENC_CLOCK_TIMESTAMP_SET {
+    pub bits: u32,
+    pub timeOffset: u32,
+}
+
+/// `NV_ENC_TIME_CODE` (`MAX_NUM_CLOCK_TS` is 3).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NV_ENC_TIME_CODE {
+    pub displayPicStruct: u32,
+    pub clockTimestamp: [NV_ENC_CLOCK_TIMESTAMP_SET; 3],
+}
+
+/// `NV_ENC_PIC_PARAMS_HEVC`: the per-picture HEVC parameters; all zero but the SEI payload array here.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NV_ENC_PIC_PARAMS_HEVC {
+    pub displayPOCSyntax: u32,
+    pub refPicFlag: u32,
+    pub temporalId: u32,
+    pub forceIntraRefreshWithFrameCnt: u32,
+    /// constrainedFrame:1, sliceModeDataUpdate:1, ltrMarkFrame:1, ltrUseFrames:1, reservedBitFields:28.
+    pub flags: u32,
+    pub sliceTypeData: *mut u8,
+    pub sliceTypeArrayCnt: u32,
+    pub sliceMode: u32,
+    pub sliceModeData: u32,
+    pub ltrMarkFrameIdx: u32,
+    pub ltrUseFrameBitmap: u32,
+    pub ltrUsageMode: u32,
+    pub seiPayloadArrayCnt: u32,
+    pub reserved: u32,
+    pub seiPayloadArray: *mut NV_ENC_SEI_PAYLOAD,
+    pub timeCode: NV_ENC_TIME_CODE,
+    pub reserved2: [u32; 237],
+    pub reserved3: [*mut c_void; 61],
+}
+
+/// `NV_ENC_CODEC_PIC_PARAMS`: a union of codec structures (H.264 and AV1 stay opaque inside `reserved`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union NV_ENC_CODEC_PIC_PARAMS {
+    pub hevcPicParams: NV_ENC_PIC_PARAMS_HEVC,
     pub reserved: [u32; 388],
     align: [*mut c_void; 0],
 }
