@@ -274,10 +274,7 @@ pub struct GpuPlan {
 impl GpuPlan {
     /// Bytes this plan keeps alive (layer frames + converted texels).
     fn bytes(&self) -> usize {
-        let frames = match &self.plan {
-            filmcraft_render::plan::FramePlan::Layers { layers, .. } => layers.iter().map(|l| l.frame.byte_size()).sum(),
-            filmcraft_render::plan::FramePlan::Image(img) => img.px.len() * 4,
-        };
+        let frames = self.plan.source_bytes();
         frames + self.prepared.bytes()
     }
 }
