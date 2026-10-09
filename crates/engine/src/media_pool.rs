@@ -279,14 +279,22 @@ impl MediaPool {
             return Some(s.clone());
         }
         match self.open_file(path, services) {
-            Ok(s) if s.info().audio_streams.len() >= m.info.audio_streams.len() => {
-                let src: SharedSource = Arc::new(ProxySource { proxy: s, info: m.info.clone() });
+            Ok(s) => {
+                // a proxy with fewer audio streams than the original (say one track of an OBS
+                // recording's seven) still stands in for the picture; the audio comes from the
+                // original, so every clip keeps the stream it plays
+                let audio_from = if s.info().audio_streams.len() < m.info.audio_streams.len() {
+                    log::warn!("proxy has fewer audio streams than the original: {path}; audio from full-resolution media");
+                    match &m.media {
+                        MediaRef::File { path: original } if !m.offline => self.open_file(original, services).ok(),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let src: SharedSource = Arc::new(ProxySource { proxy: s, info: m.info.clone(), audio_from });
                 self.proxies.write().unwrap_or_else(|e| e.into_inner()).insert(item, (key, src.clone()));
                 Some(src)
-            }
-            Ok(_) => {
-                log::warn!("proxy has fewer audio streams than the original: {path}; using full-resolution media");
-                None
             }
             Err(e) => {
                 // a missing proxy falls back to the full-resolution media
@@ -371,6 +379,8 @@ impl MediaSource for SlateSource {
 pub struct ProxySource {
     pub proxy: SharedSource,
     pub info: MediaInfo,
+    /// Where audio comes from when the proxy has fewer audio streams than the original.
+    pub audio_from: Option<SharedSource>,
 }
 
 impl MediaSource for ProxySource {
@@ -399,10 +409,10 @@ impl MediaSource for ProxySource {
         Ok(Arc::new(VideoFrame::rgba8(w as u32, h as u32, out).with_pts(f.pts)))
     }
     fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<AudioBuffer> {
-        self.proxy.audio(start, frames, sample_rate)
+        self.audio_from.as_ref().unwrap_or(&self.proxy).audio(start, frames, sample_rate)
     }
     fn audio_stream(&self, stream: usize, start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<AudioBuffer> {
-        self.proxy.audio_stream(stream, start, frames, sample_rate)
+        self.audio_from.as_ref().unwrap_or(&self.proxy).audio_stream(stream, start, frames, sample_rate)
     }
 }
 
