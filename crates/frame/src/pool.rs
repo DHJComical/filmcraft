@@ -11,7 +11,7 @@
 //! frame they cost a zero-fill and fresh page faults every time.
 //!
 //! The shelves are sized for the busiest work, so they are a lot to keep once it is over: whoever
-//! finishes such work (an export) calls [`trim`].
+//! finishes such work (a standalone export) calls [`trim_f32`].
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -141,23 +141,22 @@ pub fn recycle(frame: Arc<VideoFrame>) {
     }
 }
 
-/// Free every idle buffer. An export leaves the shelves full (up to [`F32_MAX_BYTES`] of float
-/// images, each the size of that export's frames, and [`MAX_BYTES`] of each plane type) and
-/// nothing else asks for those sizes again, so they would sit idle until the next export. What
-/// is still in use is not touched, and the next job starts cold, for the price of its first
-/// allocations.
-pub fn trim() {
-    // taken under the locks, freed after them: giving back hundreds of megabytes takes a moment
+/// Free the idle float images. A standalone export leaves that shelf full (up to [`F32_MAX_BYTES`]
+/// of images, each the size of that export's frames) and nothing else asks for those sizes again,
+/// so they would sit idle until the next export. Images still in use are not touched. The 8- and
+/// 16-bit plane shelves are left alone: playback recycles decoded frames through them all the time.
+pub fn trim_f32() {
+    // taken under the lock, freed after it: giving back hundreds of megabytes takes a moment
     let floats = std::mem::take(&mut *F32.lock().unwrap_or_else(PoisonError::into_inner));
-    let planes8 = std::mem::replace(&mut *U8.lock().unwrap_or_else(PoisonError::into_inner), Shelf::new());
-    let planes16 = std::mem::replace(&mut *U16.lock().unwrap_or_else(PoisonError::into_inner), Shelf::new());
-    drop((floats, planes8, planes16));
+    drop(floats);
 }
 
 /// Idle buffers held and buffers handed out again so far (`perf.stats`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PoolStats {
     pub idle_bytes: usize,
+    /// The part of `idle_bytes` held as float images ([`recycle_f32`]).
+    pub f32_idle_bytes: usize,
     pub reused: u64,
 }
 
@@ -166,7 +165,7 @@ pub fn stats() -> PoolStats {
     let a = U8.lock().unwrap_or_else(PoisonError::into_inner).bytes;
     let b = U16.lock().unwrap_or_else(PoisonError::into_inner).bytes;
     let c: usize = F32.lock().unwrap_or_else(PoisonError::into_inner).iter().map(|b| b.len().saturating_mul(4)).sum();
-    PoolStats { idle_bytes: idle(idle(a, b), c), reused: REUSED.load(Ordering::Relaxed) }
+    PoolStats { idle_bytes: idle(idle(a, b), c), f32_idle_bytes: c, reused: REUSED.load(Ordering::Relaxed) }
 }
 
 #[cfg(test)]

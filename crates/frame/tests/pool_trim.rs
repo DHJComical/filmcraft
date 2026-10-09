@@ -1,6 +1,7 @@
-//! `pool::trim` frees every idle buffer of the process-wide pool. This file holds one test on
-//! purpose: the pool is shared by every test of a binary, and another test recycling or taking
-//! buffers while this one counts them would make the counts meaningless.
+//! `pool::trim_f32` frees the idle float images of the process-wide pool and leaves the plane
+//! shelves alone. This file holds one test on purpose: the pool is shared by every test of a binary,
+//! and another test recycling or taking buffers while this one counts them would make the counts
+//! meaningless.
 
 use std::sync::Arc;
 
@@ -23,31 +24,32 @@ fn recycle_planes() {
 }
 
 #[test]
-fn trim_frees_every_idle_buffer_and_the_pool_keeps_working() {
+fn trim_f32_frees_the_float_images_keeps_the_planes_and_the_pool_keeps_working() {
     assert_eq!(pool::stats().idle_bytes, 0, "nothing has been recycled yet");
 
     // one idle buffer on each of the three shelves
     pool::recycle_f32(vec![f32::NAN; FLOATS]);
     recycle_planes();
-    let held = FLOATS * 4 + BYTES + WORDS * 2;
-    assert!(pool::stats().idle_bytes >= held, "idle {} of {held}", pool::stats().idle_bytes);
+    let planes = BYTES + WORDS * 2;
+    assert_eq!(pool::stats().f32_idle_bytes, FLOATS * 4);
+    assert!(pool::stats().idle_bytes >= FLOATS * 4 + planes, "idle {}", pool::stats().idle_bytes);
 
-    pool::trim();
-    assert_eq!(pool::stats().idle_bytes, 0, "every shelf is empty");
+    pool::trim_f32();
+    assert_eq!(pool::stats().f32_idle_bytes, 0, "the float shelf is empty");
+    assert!(pool::stats().idle_bytes >= planes, "the plane shelves are untouched");
 
-    // nothing comes back from the shelves: the float image is a fresh (zeroed) one and no take
-    // counts as a reuse
+    // the float image is a fresh (zeroed) one and doesn't count as a reuse; the planes come back
     let reused = pool::stats().reused;
     let image = pool::take_f32_overwritten(FLOATS);
     assert!(image.iter().all(|v| *v == 0.0), "the recycled image was freed");
-    drop((pool::take_u8(BYTES), pool::take_u16(WORDS)));
     assert_eq!(pool::stats().reused, reused);
+    drop((pool::take_u8(BYTES), pool::take_u16(WORDS)));
+    assert!(pool::stats().reused > reused, "the planes were kept");
 
-    // the pool works after a trim, and trimming twice (or an empty pool) is fine
+    // the pool works after a trim, and trimming twice (or an empty shelf) is fine
     pool::recycle_f32(image);
-    recycle_planes();
-    assert!(pool::stats().idle_bytes >= held);
-    pool::trim();
-    pool::trim();
-    assert_eq!(pool::stats().idle_bytes, 0);
+    assert_eq!(pool::stats().f32_idle_bytes, FLOATS * 4);
+    pool::trim_f32();
+    pool::trim_f32();
+    assert_eq!(pool::stats().f32_idle_bytes, 0);
 }
