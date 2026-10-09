@@ -131,9 +131,16 @@ pub(crate) fn named_clips(s: &Session, spec: &CommandSpec, p: &Value) -> Option<
     let clips: Vec<ClipId> = named_ids(spec, p, "clips", "clip")?.into_iter().map(ClipId).filter(|c| seq.find_item(*c).is_some()).collect();
     (!clips.is_empty()).then_some(clips)
 }
-/// Project items named explicitly in `items` / `item`, likewise.
+/// Project items named explicitly in `items` / `item`, likewise. The Project panel's selection
+/// holds bins beside items (one id space, see `project.select`), so a bin named here counts too;
+/// the project's own top bin does not, since no command acts on it (#244).
 pub(crate) fn named_items(s: &Session, spec: &CommandSpec, p: &Value) -> Option<Vec<ItemId>> {
-    let items: Vec<ItemId> = named_ids(spec, p, "items", "item")?.into_iter().map(ItemId).filter(|i| s.project.item(*i).is_some()).collect();
+    let root = s.project.root.id;
+    let exists = |i: &ItemId| {
+        let b = filmcraft_project::BinId(i.0);
+        s.project.item(*i).is_some() || (b != root && s.project.root.find_bin(b).is_some())
+    };
+    let items: Vec<ItemId> = named_ids(spec, p, "items", "item")?.into_iter().map(ItemId).filter(exists).collect();
     (!items.is_empty()).then_some(items)
 }
 
