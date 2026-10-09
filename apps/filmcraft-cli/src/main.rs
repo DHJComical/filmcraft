@@ -461,7 +461,10 @@ mod format_tests {
     #[test]
     fn startup_registers_the_hardware_decoders() {
         let hardware = super::register_hardware_decoders();
-        assert_eq!(filmcraft_platform::registered(), cfg!(any(target_os = "macos", target_os = "windows")), "{hardware:?}");
+        // always on macOS and Windows; on Linux when a VA-API driver is there
+        let expected = cfg!(any(target_os = "macos", target_os = "windows"))
+            || (cfg!(target_os = "linux") && matches!(hardware, filmcraft_platform::Availability::Available(_)));
+        assert_eq!(filmcraft_platform::registered(), expected, "{hardware:?}");
     }
 
     #[test]
