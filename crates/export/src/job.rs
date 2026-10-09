@@ -30,8 +30,8 @@ use crate::mxf_out::{MxfMux, MxfSetup};
 use crate::pipeline::Pipeline;
 use crate::settings::{AudioCodec, BitrateMode, Multiplexer};
 use crate::{
-    AudioEncoder, ColorSignal, EncodedPacket, EncoderFrame, ExportError, ExportSettings, Format, H264Pass, Out, Progress, Report, Result, VideoEncoder,
-    audio_factories, export_range, frame_span, video_factories,
+    AudioEncoder, ColorSignal, EncodedPacket, EncoderFrame, ExportError, ExportSettings, Format, H264Pass, Out, Progress, Report, Result, Stage, VideoEncoder,
+    audio_factories, export_range, frame_span, note_stage, timed, video_factories,
 };
 
 /// Output frames per interleaved group: the video packets of these frames, then the audio up to
@@ -97,6 +97,10 @@ fn make_venc(settings: &ExportSettings, w: u32, h: u32, rate: FrameRate) -> Resu
 impl Exporter {
     /// Set up an export (encoder, output size, colour signalling); sets `progress.total`.
     pub fn new(project: Arc<Project>, seq: ItemId, settings: &ExportSettings, progress: &Progress) -> Result<Self> {
+        timed(Stage::Setup, || Self::set_up(project, seq, settings, progress))
+    }
+
+    fn set_up(project: Arc<Project>, seq: ItemId, settings: &ExportSettings, progress: &Progress) -> Result<Self> {
         if !stepped(settings.format) {
             return Err(ExportError::Unsupported(format!("{} is not a stepped export", settings.format.label())));
         }
@@ -283,7 +287,8 @@ impl Exporter {
                 progress.set_status("Measuring loudness");
             }
             let a = self.audio.as_mut().ok_or_else(|| ExportError::Encode("internal: the audio pipeline was not created".into()))?;
-            a.measure(&self.settings, sources, &|| progress.cancel.load(Ordering::Relaxed))?;
+            let settings = &self.settings;
+            timed(Stage::Loudness, || a.measure(settings, sources, &|| progress.cancel.load(Ordering::Relaxed)))?;
             if filmcraft_media::pending::take() {
                 return Ok(Step::Pending);
             }
@@ -297,12 +302,12 @@ impl Exporter {
         if self.next < self.f1 {
             let (f, end) = (self.next, (self.next + self.batch).min(self.f1));
             let pipe = &self.pipe;
-            let frames: Vec<(Vec<u8>, Vec<f32>)> = (f..end).into_par_iter().map(|fi| pipe.frame(fi, sources)).collect();
+            let frames: Vec<(Vec<u8>, Vec<f32>)> = timed(Stage::Render, || (f..end).into_par_iter().map(|fi| pipe.frame(fi, sources)).collect());
             if self.first_pass {
                 if filmcraft_media::pending::take() {
                     return Ok(Step::Pending);
                 }
-                self.encode(&frames, f)?;
+                timed(Stage::Encode, || self.encode(&frames, f))?;
                 progress.done.fetch_add((end - f) as u64, Ordering::Relaxed);
                 self.next = end;
                 return Ok(Step::Progress);
@@ -312,10 +317,12 @@ impl Exporter {
             let cuts: Vec<i64> = (f + 1..=end).filter(|&g| (g - self.f0) % INTERLEAVE == 0).collect();
             let mut mixed = Vec::with_capacity(cuts.len());
             if let Some(sr) = self.audio.as_ref().map(|a| a.sr) {
+                let t = web_time::Instant::now();
                 for &g in &cuts {
                     let until = self.sample_at_frame(g, sr);
                     mixed.push(self.audio.as_mut().and_then(|a| a.pull(until, sources)));
                 }
+                note_stage(Stage::Audio, t.elapsed());
             }
             if filmcraft_media::pending::take() {
                 return Ok(Step::Pending);
@@ -323,15 +330,18 @@ impl Exporter {
             let mut mixed = mixed.into_iter();
             for (k, frame) in frames.iter().enumerate() {
                 let fi = f + k as i64;
-                let packets = self.encode(std::slice::from_ref(frame), fi)?;
+                let packets = timed(Stage::Encode, || self.encode(std::slice::from_ref(frame), fi))?;
                 self.queued.extend(packets);
                 if cuts.contains(&(fi + 1)) {
-                    if self.mux.is_none() && self.mxf.is_none() {
-                        self.open_mux()?;
-                    }
-                    let packets = std::mem::take(&mut self.queued);
-                    self.write_video(packets)?;
-                    self.write_audio(mixed.next().flatten())?;
+                    timed(Stage::Mux, || -> Result<()> {
+                        if self.mux.is_none() && self.mxf.is_none() {
+                            self.open_mux()?;
+                        }
+                        let packets = std::mem::take(&mut self.queued);
+                        self.write_video(packets)
+                    })?;
+                    let pcm = mixed.next().flatten();
+                    timed(Stage::Audio, || self.write_audio(pcm))?;
                 }
             }
             progress.done.fetch_add((end - f) as u64, Ordering::Relaxed);
@@ -348,6 +358,7 @@ impl Exporter {
             self.next = self.f0;
             return Ok(Step::Progress);
         }
+        let finishing = web_time::Instant::now();
         let mixed = self.audio.as_mut().and_then(|a| a.rest(sources));
         if filmcraft_media::pending::take() {
             return Ok(Step::Pending);
@@ -379,6 +390,7 @@ impl Exporter {
                 (w.finish(&self.settings)?, Vec::new())
             }
         };
+        note_stage(Stage::Finish, finishing.elapsed());
         let secs = self.t0.elapsed().as_secs_f64();
         let nframes = self.frames();
         if !self.settings.part_of_batch {

@@ -658,6 +658,71 @@ pub fn note_hw_encode_declined() {
     HW_DECLINED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// The stages of an export whose wall time [`stage_times`] adds up (`perf.stats` `export.stages`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// [`Exporter::new`]: settings, pipeline, encoder and audio set-up.
+    Setup,
+    /// The loudness pass before the first frame (normalised audio only).
+    Loudness,
+    /// Rendering a batch of frames (parallel; includes decoding the sources, effects, colour).
+    Render,
+    /// Encoding the rendered frames, colour conversion included (serial).
+    Encode,
+    /// The part of [`Stage::Encode`] spent converting RGB to the encoder's YUV.
+    Convert,
+    /// Mixing and encoding audio and writing it to the container.
+    Audio,
+    /// Writing video samples to the container (and creating it).
+    Mux,
+    /// Flushing the encoders and finishing the file.
+    Finish,
+}
+
+const STAGES: usize = 8;
+
+impl Stage {
+    pub const ALL: [Stage; STAGES] = [Stage::Setup, Stage::Loudness, Stage::Render, Stage::Encode, Stage::Convert, Stage::Audio, Stage::Mux, Stage::Finish];
+
+    /// The name in `perf.stats`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Stage::Setup => "setup",
+            Stage::Loudness => "loudness",
+            Stage::Render => "render",
+            Stage::Encode => "encode",
+            Stage::Convert => "convert",
+            Stage::Audio => "audio",
+            Stage::Mux => "mux",
+            Stage::Finish => "finish",
+        }
+    }
+}
+
+static STAGE_NS: [std::sync::atomic::AtomicU64; STAGES] = [const { std::sync::atomic::AtomicU64::new(0) }; STAGES];
+
+/// Wall time each export stage has taken so far in this process, in nanoseconds, summed over every
+/// stepped export (they only grow: diff two readings to measure one export). Measuring costs two
+/// clock reads per stage per batch; nothing an export does depends on it.
+pub fn stage_times() -> Vec<(Stage, u64)> {
+    Stage::ALL.iter().map(|s| (*s, STAGE_NS.get(*s as usize).map_or(0, |a| a.load(std::sync::atomic::Ordering::Relaxed)))).collect()
+}
+
+/// Add `d` to a stage's wall time (also for encoders outside this crate: [`Stage::Convert`]).
+pub fn note_stage(stage: Stage, d: std::time::Duration) {
+    if let Some(a) = STAGE_NS.get(stage as usize) {
+        a.fetch_add(u64::try_from(d.as_nanos()).unwrap_or(u64::MAX), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Run `f`, adding its wall time to `stage`.
+pub fn timed<T>(stage: Stage, f: impl FnOnce() -> T) -> T {
+    let t = web_time::Instant::now();
+    let r = f();
+    note_stage(stage, t.elapsed());
+    r
+}
+
 /// Register a video encoder factory (tried before the built-in ones and those registered earlier).
 /// Registering the same factory twice is harmless.
 pub fn register_encoder(f: EncoderFactory) {
@@ -795,13 +860,13 @@ impl VideoEncoder for ProResEncoder {
     }
     fn encode(&mut self, f: &EncoderFrame) -> Result<Vec<EncodedPacket>> {
         let mut fr = filmcraft_prores::Frame::new(f.width, f.height, filmcraft_prores::ChromaFormat::Yuv422, 10, false);
-        match f.hdr {
+        timed(Stage::Convert, || match f.hdr {
             Some(rgb) => {
                 let (kr, kb) = self.signal.kr_kb();
                 rgbf_to_yuv422_10(rgb, f.width as usize, f.height as usize, kr, kb, &mut fr.y, &mut fr.cb, &mut fr.cr)
             }
             None => rgba_to_yuv422_10(f.rgba, f.width as usize, f.height as usize, &mut fr.y, &mut fr.cb, &mut fr.cr),
-        }
+        });
         let data = self.enc.encode(&fr).map_err(|e| ExportError::Encode(e.to_string()))?;
         Ok(vec![EncodedPacket { data, key: true, duration: self.rate.den as u32, composition_offset: 0 }])
     }
@@ -1072,13 +1137,13 @@ impl VideoEncoder for H264Encoder {
         self.rate.num as u32
     }
     fn encode(&mut self, f: &EncoderFrame) -> Result<Vec<EncodedPacket>> {
-        match f.hdr {
+        timed(Stage::Convert, || match f.hdr {
             Some(rgb) => {
                 let (kr, kb) = self.signal.kr_kb();
                 rgbf_to_yuv420_8(rgb, f.width as usize, f.height as usize, kr, kb, &mut self.y, &mut self.u, &mut self.v)
             }
             None => rgba_to_yuv420_8(f.rgba, f.width as usize, f.height as usize, &mut self.y, &mut self.u, &mut self.v),
-        }
+        });
         let cw = (f.width as usize).div_ceil(2);
         let frame = filmcraft_h264enc::YuvFrame { y: &self.y, u: &self.u, v: &self.v, y_stride: f.width as usize, uv_stride: cw };
         let ps = self.enc.try_encode(&frame, f.index as i64 * self.rate.den).map_err(|e| ExportError::Encode(e.to_string()))?;

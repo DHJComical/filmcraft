@@ -57,7 +57,9 @@ impl VideoEncoder for NvencEncoder {
         if f.width != self.w || f.height != self.h {
             return Err(ExportError::Encode(format!("NVENC: a {}x{} picture for a {}x{} encoder", f.width, f.height, self.w, self.h)));
         }
-        filmcraft_export::rgba_to_yuv420_8(f.rgba, self.w as usize, self.h as usize, &mut self.y, &mut self.u, &mut self.v);
+        filmcraft_export::timed(filmcraft_export::Stage::Convert, || {
+            filmcraft_export::rgba_to_yuv420_8(f.rgba, self.w as usize, self.h as usize, &mut self.y, &mut self.u, &mut self.v)
+        });
         let ps = self
             .enc
             .encode(&self.y, &self.u, &self.v, f.index)

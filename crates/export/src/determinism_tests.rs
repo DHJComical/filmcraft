@@ -46,6 +46,24 @@ fn same_file_whatever_the_core_count() {
     }
 }
 
+#[test]
+fn an_export_adds_up_the_wall_time_of_its_stages() {
+    let before: Vec<(Stage, u64)> = stage_times();
+    let s = ExportSettings { format: Format::H264, path: tmp("stages.mp4"), ..Default::default() };
+    let (p, seq, m) = project();
+    export(&p, seq, &s, &m, &Progress::default()).unwrap();
+    let after = stage_times();
+    let grew = |stage: Stage| {
+        let at = |v: &[(Stage, u64)]| v.iter().find(|(s, _)| *s == stage).map_or(0, |(_, ns)| *ns);
+        at(&after) > at(&before)
+    };
+    // other tests export in parallel, so the counters can only be checked for growth
+    for stage in [Stage::Setup, Stage::Render, Stage::Encode, Stage::Convert, Stage::Audio, Stage::Mux, Stage::Finish] {
+        assert!(grew(stage), "{} did not grow", stage.name());
+    }
+    assert_eq!(Stage::ALL.len(), after.len(), "one counter per stage");
+}
+
 /// Slice NAL units (types 1 and 5) in a length-prefixed (4-byte) H.264 sample.
 fn slices_in(sample: &[u8]) -> usize {
     let (mut n, mut i) = (0, 0);
