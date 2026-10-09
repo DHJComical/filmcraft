@@ -75,7 +75,7 @@ fn yuv_code_range_gpu_matches_cpu() {
                 // One output-code tolerance: CPU f32 vs GPU f16 accumulator quantization.
                 assert!(error <= 1, "{bits}-bit {range:?} U={u} V={v}: max error {error}");
                 if u == 128 && v == 128 {
-                    assert!(gpu.chunks_exact(4).all(|p| p[0] == p[1] && p[1] == p[2]), "neutral tint: {bits}-bit {range:?}");
+                    assert!(gpu.as_chunks::<4>().0.iter().all(|p| p[0] == p[1] && p[1] == p[2]), "neutral tint: {bits}-bit {range:?}");
                 }
                 let prepared = prepare(&plan);
                 prepared_compositor.composite_prepared(&plan, Some(&prepared));
