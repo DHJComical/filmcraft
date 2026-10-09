@@ -100,9 +100,13 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect)
     }
 }
 
+pub mod source_drag;
+pub mod source_range;
+
 #[derive(Clone, Debug)]
 enum DragPayload {
     Item(ItemId),
+    Source(source_drag::SourceDrag),
     Effect(String),
     /// A graphics template (id, name) from Essential Graphics ▸ Browse.
     Template(String, String),
@@ -112,6 +116,15 @@ fn payload_id() -> egui::Id {
     egui::Id::new("filmcraft-drag-payload")
 }
 
+pub fn start_drag_source(ui: &egui::Ui, source: source_drag::SourceDrag) {
+    ui.ctx().data_mut(|d| d.insert_temp(payload_id(), Some(DragPayloadBox(DragPayload::Source(source)))));
+}
+pub fn dragged_source(ui: &egui::Ui) -> Option<source_drag::SourceDrag> {
+    match payload(ui) {
+        Some(DragPayload::Source(s)) => Some(s),
+        _ => None,
+    }
+}
 pub fn start_drag_item(ui: &egui::Ui, item: ItemId) {
     ui.ctx().data_mut(|d| d.insert_temp(payload_id(), Some(DragPayloadBox(DragPayload::Item(item)))));
 }
@@ -136,6 +149,7 @@ fn payload(ui: &egui::Ui) -> Option<DragPayload> {
 pub fn dragged_project_item(ui: &egui::Ui) -> Option<ItemId> {
     match payload(ui) {
         Some(DragPayload::Item(i)) => Some(i),
+        Some(DragPayload::Source(s)) => Some(s.item),
         _ => None,
     }
 }
@@ -156,6 +170,15 @@ pub fn drag_ghost(app: &FilmcraftApp, ui: &egui::Ui) {
     if let Some(p) = ctx.pointer_hover_pos() {
         let label = match &pl {
             DragPayload::Item(i) => app.session.project.item(*i).map(|x| x.name.clone()).unwrap_or_default(),
+            DragPayload::Source(s) => {
+                let name = app.session.project.item(s.item).map(|i| i.name.as_str()).unwrap_or("Source");
+                let mode = match (s.video, s.audio) {
+                    (true, true) => "video + audio",
+                    (true, false) => "video",
+                    _ => "audio",
+                };
+                format!("{name} · {mode} · {:.2} s", s.range.duration.seconds())
+            }
             DragPayload::Template(_, name) => name.clone(),
             DragPayload::Effect(e) => match e.strip_prefix("preset:") {
                 Some(name) => name.to_string(),

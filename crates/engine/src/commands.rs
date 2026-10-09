@@ -1646,19 +1646,30 @@ fn build() -> Vec<CommandSpec> {
             Ok(Value::Null)
         }),
         // With no In / Out mark, like Premiere: the start / end of the sequence (#208).
-        cmd!("markers.goToIn", "Go to In", ["Markers"], Some("Shift+I"), "{}", has_seq, |s, _| {
+        cmd!("markers.goToIn", "Go to In", ["Markers"], Some("Shift+I"), r#"{"target":"program|source"}"#, always, |s, p| {
+            if let Some(v) = crate::source_monitor::route(s, "markers.goToIn", p)? {
+                return Ok(v);
+            }
+            s.active_sequence().ok_or(EngineError::NoSequence)?;
             if let Some(i) = s.active_sequence().map(|q| q.mark_in.unwrap_or(Tick::ZERO)) {
                 s.set_playhead(i);
             }
             Ok(Value::Null)
         }),
-        cmd!("markers.goToOut", "Go to Out", ["Markers"], Some("Shift+O"), "{}", has_seq, |s, _| {
+        cmd!("markers.goToOut", "Go to Out", ["Markers"], Some("Shift+O"), r#"{"target":"program|source"}"#, always, |s, p| {
+            if let Some(v) = crate::source_monitor::route(s, "markers.goToOut", p)? {
+                return Ok(v);
+            }
+            s.active_sequence().ok_or(EngineError::NoSequence)?;
             if let Some(o) = s.active_sequence().map(|q| q.mark_out.unwrap_or_else(|| q.duration())) {
                 s.set_playhead(o);
             }
             Ok(Value::Null)
         }),
-        cmd!("markers.clearIn", "Clear In", ["Markers"], Some("Cmd+Shift+I"), "{}", has_seq, |s, _| {
+        cmd!("markers.clearIn", "Clear In", ["Markers"], Some("Cmd+Shift+I"), r#"{"target":"program|source"}"#, always, |s, p| {
+            if let Some(v) = crate::source_monitor::route(s, "markers.clearIn", p)? {
+                return Ok(v);
+            }
             s.edit_sequence("Clear In", |q, _, _| {
                 q.mark_in = None;
                 q.split.video_in = None;
@@ -1667,7 +1678,10 @@ fn build() -> Vec<CommandSpec> {
             })?;
             Ok(Value::Null)
         }),
-        cmd!("markers.clearOut", "Clear Out", ["Markers"], Some("Cmd+Shift+O"), "{}", has_seq, |s, _| {
+        cmd!("markers.clearOut", "Clear Out", ["Markers"], Some("Cmd+Shift+O"), r#"{"target":"program|source"}"#, always, |s, p| {
+            if let Some(v) = crate::source_monitor::route(s, "markers.clearOut", p)? {
+                return Ok(v);
+            }
             s.edit_sequence("Clear Out", |q, _, _| {
                 q.mark_out = None;
                 q.split.video_out = None;
@@ -1676,7 +1690,10 @@ fn build() -> Vec<CommandSpec> {
             })?;
             Ok(Value::Null)
         }),
-        cmd!("markers.clearInOut", "Clear In and Out", ["Markers"], Some("Cmd+Shift+X"), "{}", has_seq, |s, _| {
+        cmd!("markers.clearInOut", "Clear In and Out", ["Markers"], Some("Cmd+Shift+X"), r#"{"target":"program|source"}"#, always, |s, p| {
+            if let Some(v) = crate::source_monitor::route(s, "markers.clearInOut", p)? {
+                return Ok(v);
+            }
             s.edit_sequence("Clear In and Out", |q, _, _| {
                 q.mark_in = None;
                 q.mark_out = None;
@@ -1690,9 +1707,12 @@ fn build() -> Vec<CommandSpec> {
             "Add Marker",
             ["Markers"],
             Some("M"),
-            r#"{"time":ticks?,"name":str?,"comment":str?,"color":label?,"durationFrames":i64?}"#,
-            has_seq,
+            r#"{"target":"program|source","time":ticks?,"name":str?,"comment":str?,"color":label?,"durationFrames":i64?}"#,
+            always,
             |s, p| {
+                if let Some(v) = crate::source_monitor::route(s, "markers.add", p)? {
+                    return Ok(v);
+                }
                 let (_seq, ph) = marker_list_mut(s)?;
                 let t = time_p(s, p, "").unwrap_or(ph);
                 let name = str_p(p, "name").unwrap_or("").to_string();
@@ -1708,21 +1728,32 @@ fn build() -> Vec<CommandSpec> {
                 Ok(json!({"marker": id.0}))
             }
         ),
-        cmd!("markers.goNext", "Go to Next Marker", ["Markers"], Some("Shift+M"), "{}", has_seq, |s, _| {
+        cmd!("markers.goNext", "Go to Next Marker", ["Markers"], Some("Shift+M"), r#"{"target":"program|source"}"#, always, |s, p| {
+            if let Some(v) = crate::source_monitor::route(s, "markers.goNext", p)? {
+                return Ok(v);
+            }
             let t = s.playhead();
+            s.active_sequence().ok_or(EngineError::NoSequence)?;
             if let Some(m) = s.active_sequence().and_then(|q| q.markers.iter().map(|m| m.start).find(|m| *m > t)) {
                 s.set_playhead(m);
             }
             Ok(Value::Null)
         }),
-        cmd!("markers.goPrev", "Go to Previous Marker", ["Markers"], Some("Cmd+Shift+M"), "{}", has_seq, |s, _| {
+        cmd!("markers.goPrev", "Go to Previous Marker", ["Markers"], Some("Cmd+Shift+M"), r#"{"target":"program|source"}"#, always, |s, p| {
+            if let Some(v) = crate::source_monitor::route(s, "markers.goPrev", p)? {
+                return Ok(v);
+            }
             let t = s.playhead();
+            s.active_sequence().ok_or(EngineError::NoSequence)?;
             if let Some(m) = s.active_sequence().and_then(|q| q.markers.iter().rev().map(|m| m.start).find(|m| *m < t)) {
                 s.set_playhead(m);
             }
             Ok(Value::Null)
         }),
-        cmd!("markers.clearCurrent", "Clear Selected Marker", ["Markers"], Some("Cmd+Alt+M"), "{}", has_seq, |s, _| {
+        cmd!("markers.clearCurrent", "Clear Selected Marker", ["Markers"], Some("Cmd+Alt+M"), r#"{"target":"program|source"}"#, always, |s, p| {
+            if let Some(v) = crate::source_monitor::route(s, "markers.clearCurrent", p)? {
+                return Ok(v);
+            }
             let t = s.playhead();
             s.edit_sequence("Clear Marker", |q, _, _| {
                 q.markers.retain(|m| m.start != t);
@@ -1730,7 +1761,10 @@ fn build() -> Vec<CommandSpec> {
             })?;
             Ok(Value::Null)
         }),
-        cmd!("markers.clearAll", "Clear Markers", ["Markers"], Some("Cmd+Alt+Shift+M"), "{}", has_seq, |s, _| {
+        cmd!("markers.clearAll", "Clear Markers", ["Markers"], Some("Cmd+Alt+Shift+M"), r#"{"target":"program|source"}"#, always, |s, p| {
+            if let Some(v) = crate::source_monitor::route(s, "markers.clearAll", p)? {
+                return Ok(v);
+            }
             s.edit_sequence("Clear All Markers", |q, _, _| {
                 q.markers.clear();
                 Ok(())
@@ -1742,9 +1776,12 @@ fn build() -> Vec<CommandSpec> {
             "Edit Marker…",
             [],
             None,
-            r#"{"marker":id,"name":str?,"comment":str?,"color":label?,"durationFrames":i64?}"#,
-            has_seq,
+            r#"{"target":"program|source","marker":id,"name":str?,"comment":str?,"color":label?,"durationFrames":i64?}"#,
+            always,
             |s, p| {
+                if let Some(v) = crate::source_monitor::route(s, "markers.edit", p)? {
+                    return Ok(v);
+                }
                 let id = u64_p(p, "marker").map(MarkerId).ok_or_else(|| bad("markers.edit", "need `marker`"))?;
                 let rate = s.sequence_rate();
                 let p = p.clone();
@@ -1844,9 +1881,18 @@ fn build() -> Vec<CommandSpec> {
             "Place Clip",
             [],
             None,
-            r#"{"item":id,"track":"V1"|id|"A1" (sound only)?,"audioTrack":"A1"|id?,"time":ticks|"frame":i64|"seconds":f64,"insert":bool,"sourceIn":ticks?,"duration":ticks?}"#,
+            r#"{"item":id,"track":"V1"|id|"A1" (sound only)?,"audioTrack":"A1"|id?,"time":ticks|"frame":i64|"seconds":f64,"insert":bool,"sourceIn":ticks?,"duration":ticks?,"video":bool=true,"audio":bool=true}"#,
             has_seq,
             |s, p| {
+                let stream_flag = |key: &str| match p.get(key) {
+                    None => Ok(true),
+                    Some(Value::Bool(v)) => Ok(*v),
+                    _ => Err(bad("timeline.place", format!("`{key}` must be a boolean"))),
+                };
+                let (video, audio) = (stream_flag("video")?, stream_flag("audio")?);
+                if !video && !audio {
+                    return Err(bad("timeline.place", "enable video, audio, or both"));
+                }
                 let item = item_p(p, "item").ok_or_else(|| bad("timeline.place", "need `item`"))?;
                 let at = time_p(s, p, "").unwrap_or(s.playhead());
                 let tg = s.targeting();
@@ -1868,6 +1914,14 @@ fn build() -> Vec<CommandSpec> {
                     }
                     (v, a) => (v.or(tg.video_dest), a.or(tg.audio_dest)),
                 };
+                let v = v.filter(|_| video);
+                let a = a.filter(|_| audio);
+                if p.get("video").is_some() && video && pi.has_video() && v.is_none() {
+                    return Err(bad("timeline.place", "no video destination: add or enable a video track"));
+                }
+                if p.get("audio").is_some() && audio && pi.has_audio() && a.is_none() {
+                    return Err(bad("timeline.place", "no audio destination: add or enable an audio track"));
+                }
                 let full = match &pi.kind {
                     // Settings ▸ Timeline ▸ Still Image Default Duration
                     ItemKind::Media(m)
