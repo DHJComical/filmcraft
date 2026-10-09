@@ -130,6 +130,8 @@ pub enum Dialog {
     DeleteTracks,
     /// Sequence ▸ Add Tracks….
     AddTracks,
+    /// Sequence ▸ Sequence Settings….
+    SequenceSettings,
 }
 
 #[derive(Default)]
@@ -172,6 +174,17 @@ const SCREENSHOT_TIMEOUT_S: f64 = 10.0;
 /// timeline zoom animation finished) before capturing what is there.
 const SCREENSHOT_SETTLE_MAX_S: f64 = 5.0;
 
+/// File ▸ Export entries that run from the menus through the save panel: command, filter label,
+/// extension.
+pub(crate) const EXPORT_SAVE_DIALOGS: [(&str, &str, &str); 6] = [
+    ("file.exportEdl", "EDL", "edl"),
+    ("file.exportFcp7Xml", "Final Cut Pro XML", "xml"),
+    ("file.exportFcpxml", "FCPXML", "fcpxml"),
+    ("file.exportOtio", "OpenTimelineIO", "otio"),
+    ("file.exportAle", "Avid Log Exchange", "ale"),
+    ("file.exportSelectionProject", "FilmCraft Project", "fcproj"),
+];
+
 pub struct FilmcraftApp {
     pub session: Session,
     pub ui: UiState,
@@ -200,6 +213,11 @@ pub struct FilmcraftApp {
     /// A paused monitor drew a stand-in (nearest cached) picture last frame: its exact frame is
     /// still decoding.
     pub(crate) monitor_inexact: bool,
+    /// Per monitor: the frames it asked for on its latest paused passes, oldest first (stand-ins
+    /// while the newest renders, see `panels::monitor`).
+    pub(crate) monitor_asked: HashMap<String, std::collections::VecDeque<FrameKey>>,
+    /// The frame whose picture the Program monitor drew last: the frame due, or its stand-in.
+    pub(crate) program_shown: Option<FrameKey>,
     /// Consecutive frames the timeline zoom / scroll has been at rest. `ui.elements` answers from
     /// the frame before the last one, so its timeline rects are final from 2 on.
     pub(crate) timeline_still: u32,
@@ -396,6 +414,8 @@ impl FilmcraftApp {
             pending_screenshots: Vec::new(),
             queued_screenshots: Vec::new(),
             monitor_inexact: false,
+            monitor_asked: HashMap::new(),
+            program_shown: None,
             timeline_still: 0,
             input_waiters: Vec::new(),
             next_token: 1,
@@ -892,6 +912,17 @@ impl FilmcraftApp {
         self.textures.get(name).map(|(_, t)| (t.id(), t.size_vec2()))
     }
 
+    /// The frame a named texture shows.
+    pub fn texture_key(&self, name: &str) -> Option<FrameKey> {
+        self.textures.get(name).map(|(k, _)| *k)
+    }
+
+    /// The frame whose picture the Program monitor drew last: the frame due at the playhead, or
+    /// the stand-in shown while that one renders (`perf.stats`, tests).
+    pub fn program_picture(&self) -> Option<FrameKey> {
+        self.program_shown
+    }
+
     /// Get a thumbnail texture for an item at a media time (requested at low priority).
     /// Cache revision of a project item's own frames: media changes only when its file does
     /// (relink, Make Offline, proxies on/off), so its frames survive unrelated edits; other items
@@ -938,6 +969,11 @@ impl FilmcraftApp {
 
     // ---------------------------------------------------------------- files
 
+    /// Destination of imports started from the currently shown Project panel view.
+    pub fn import_bin(&self) -> filmcraft_project::BinId {
+        panels::project::view_of(self, panels::project::shown_inst(self)).bin
+    }
+
     pub fn file_dialog(&mut self, id: &str, params: &Value) -> Result<Value, String> {
         match id {
             "file.import" => {
@@ -952,7 +988,8 @@ impl FilmcraftApp {
                 if paths.is_empty() {
                     return Ok(Value::Null);
                 }
-                let r = self.session.execute("file.import", json!({"paths": paths})).map_err(|e| e.to_string());
+                let bin = params.get("bin").cloned().unwrap_or_else(|| json!(self.import_bin().0));
+                let r = self.session.execute("file.import", json!({"paths": paths, "bin": bin})).map_err(|e| e.to_string());
                 if let Ok(v) = &r
                     && let Some(errs) = v.get("errors").and_then(Value::as_array)
                     && !errs.is_empty()
@@ -1007,8 +1044,38 @@ impl FilmcraftApp {
                 p["path"] = json!(path);
                 self.session.execute("captions.export", p).map_err(|e| e.to_string())
             }
-            _ => Err(format!("no dialog for {id}")),
+            _ => match EXPORT_SAVE_DIALOGS.iter().find(|(c, ..)| *c == id) {
+                Some(&(_, filter, ext)) => self.export_save_dialog(id, filter, ext, params),
+                None => Err(format!("no dialog for {id}")),
+            },
         }
+    }
+
+    /// File ▸ Export ▸ EDL…, Final Cut Pro XML… etc. from the menus (#382): ask where to save, then
+    /// run the command with that `path` and the rest of `params`.
+    fn export_save_dialog(&mut self, id: &str, filter: &str, ext: &str, params: &Value) -> Result<Value, String> {
+        filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&self.session))?;
+        let Some(pick) = self.hooks.pick_save_as.as_mut() else {
+            return Err("no save dialog available: run the command with a `path`".into());
+        };
+        // Timelines are named after the sequence; a selection must not suggest the open project's file.
+        let sequence = self.session.state.active_sequence.and_then(|s| self.session.project.item(s)).map(|i| i.name.clone());
+        let stem = match id {
+            "file.exportAle" => self.session.project.name.clone(),
+            "file.exportSelectionProject" => format!("{} selection", self.session.project.name),
+            _ => sequence.unwrap_or_else(|| self.session.project.name.clone()),
+        };
+        let stem: String = stem.chars().map(|c| if matches!(c, '/' | '\\') || c.is_control() { '-' } else { c }).collect();
+        let stem = if stem.trim().is_empty() { "Untitled".to_string() } else { stem };
+        let Some(path) = pick(filter, &[ext], &format!("{stem}.{ext}")) else { return Ok(Value::Null) };
+        let mut p = params.as_object().cloned().unwrap_or_default();
+        p.insert("path".into(), json!(path));
+        let r = self.session.execute(id, Value::Object(p)).map_err(|e| e.to_string());
+        self.ui.status = match &r {
+            Ok(_) => format!("Exported {path}"),
+            Err(e) => e.clone(),
+        };
+        r
     }
 
     /// Import dropped files.
@@ -1022,7 +1089,7 @@ impl FilmcraftApp {
             }
         }
         if !paths.is_empty() {
-            let _ = self.session.execute("file.import", json!({"paths": paths}));
+            let _ = self.session.execute("file.import", json!({"paths": paths, "bin": self.import_bin().0}));
         }
     }
 
@@ -1235,10 +1302,12 @@ impl FilmcraftApp {
         let t = self.tokens;
         let full = ui.max_rect();
         ui.painter().rect_filled(full, 0.0, t.app_bg);
-        let header_h = 38.0;
+        let header_h = if self.ui.show_header { 38.0 } else { 0.0 };
         let header = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), header_h));
-        header::show(self, ui, header);
-        let status_h = 20.0;
+        if self.ui.show_header {
+            header::show(self, ui, header);
+        }
+        let status_h = if self.ui.show_status_bar { 20.0 } else { 0.0 };
         let body = egui::Rect::from_min_max(egui::pos2(full.min.x + 1.0, header.max.y + 1.0), egui::pos2(full.max.x - 1.0, full.max.y - status_h - 2.0));
         match self.ui.mode {
             state::Mode::Edit => self.dock_area(ui, body),
@@ -1246,9 +1315,14 @@ impl FilmcraftApp {
             state::Mode::Export => panels::export_mode::show(self, ui, body),
         }
         panels::dialogs::show(self, &ctx);
+        if !self.ui.show_status_bar {
+            // no bar to draw the job in, but a finished preview render still plays
+            self.watch_jobs(ui.ctx());
+            return;
+        }
         // Status / hint bar
         let sb = egui::Rect::from_min_max(egui::pos2(full.min.x, full.max.y - status_h), full.max);
-        ui.painter().rect_filled(sb, 0.0, egui::Color32::from_rgb(0x1c, 0x1c, 0x1c));
+        ui.painter().rect_filled(sb, 0.0, t.header_bg);
         let now = ui.input(|i| i.time);
         if self.ui.status != self.status_seen.0 {
             self.status_seen = (self.ui.status.clone(), now);
@@ -1268,9 +1342,9 @@ impl FilmcraftApp {
         self.job_status(ui, sb, &t);
     }
 
-    /// Right side of the status bar: the running job (export / render previews) with a progress
-    /// bar and a cancel button; plays the rendered range when a preview render completes.
-    fn job_status(&mut self, ui: &mut egui::Ui, sb: egui::Rect, t: &Tokens) {
+    /// The running job (export / render previews), if any; plays the rendered range when a preview
+    /// render completes. Runs every frame, with or without the status bar.
+    fn watch_jobs(&mut self, ctx: &egui::Context) -> Option<filmcraft_engine::Job> {
         use std::sync::atomic::Ordering;
         let running = self.session.jobs.iter().rev().find(|j| !j.progress.finished.load(Ordering::Relaxed)).cloned();
         // Play after rendering previews.
@@ -1285,12 +1359,20 @@ impl FilmcraftApp {
                 self.play(1.0);
             }
         }
-        let Some(job) = running else { return };
+        let job = running?;
         if job.label.starts_with("Rendering ") && !job.label.contains("audio") && self.watched_render.is_none_or(|w| w.0 != job.id) {
             let from = self.session.active_sequence().and_then(|q| q.mark_in).unwrap_or(Tick::ZERO);
             self.watched_render = Some((job.id, from));
         }
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(150));
+        ctx.request_repaint_after(std::time::Duration::from_millis(150));
+        Some(job)
+    }
+
+    /// Right side of the status bar: the running job (export / render previews) with a progress
+    /// bar and a cancel button.
+    fn job_status(&mut self, ui: &mut egui::Ui, sb: egui::Rect, t: &Tokens) {
+        use std::sync::atomic::Ordering;
+        let Some(job) = self.watch_jobs(ui.ctx()) else { return };
         let f = job.progress.fraction().clamp(0.0, 1.0);
         let left = job.progress.eta().map(panels::left_text).unwrap_or_default();
         let cancel = egui::Rect::from_center_size(egui::pos2(sb.max.x - 14.0, sb.center().y), egui::vec2(14.0, 14.0));
@@ -1321,8 +1403,10 @@ impl FilmcraftApp {
 
     /// Contextual hint for the status bar (Premiere shows tool/gesture hints here).
     fn hint_text(&self) -> String {
+        let mac = cfg!(target_os = "macos");
         match self.ui.tool {
-            state::Tool::Selection => "Click to select, or click in empty space and drag to marquee select. Use Shift, Opt, and Cmd for other options.",
+            state::Tool::Selection if mac => "Click to select, or click in empty space and drag to marquee select. Use Shift, Opt, and Cmd for other options.",
+            state::Tool::Selection => "Click to select, or click in empty space and drag to marquee select. Use Shift, Alt, and Ctrl for other options.",
             state::Tool::TrackSelectForward => "Click to select all clips to the right in all tracks. Shift-click for a single track.",
             state::Tool::TrackSelectBackward => "Click to select all clips to the left in all tracks. Shift-click for a single track.",
             state::Tool::Ripple => "Drag an edit point to ripple trim; later clips move to keep the gap closed.",
@@ -1333,7 +1417,8 @@ impl FilmcraftApp {
             state::Tool::Slip => "Drag a clip to slip its source in/out without moving it.",
             state::Tool::Slide => "Drag a clip to slide it between its neighbours.",
             state::Tool::Hand => "Drag to scroll the timeline.",
-            state::Tool::Zoom => "Click to zoom in; Opt-click to zoom out.",
+            state::Tool::Zoom if mac => "Click to zoom in; Opt-click to zoom out.",
+            state::Tool::Zoom => "Click to zoom in; Alt-click to zoom out.",
             _ => "",
         }
         .to_string()
