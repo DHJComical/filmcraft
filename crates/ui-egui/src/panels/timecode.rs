@@ -44,7 +44,7 @@ pub fn row_text(app: &FilmcraftApp, row: &TimecodeRow) -> (String, String) {
                 ItemKind::Sequence(q) => (q.mark_in, q.mark_out),
                 _ => (None, None),
             };
-            let sr = it.as_media().and_then(|m| m.info.audio.as_ref()).map(|a| a.sample_rate as i64).unwrap_or(48000);
+            let sr = it.as_media().and_then(|m| m.info.audio()).map(|a| a.sample_rate as i64).unwrap_or(48000);
             View {
                 name: it.name.clone(),
                 rate: it.frame_rate(),

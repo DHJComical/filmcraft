@@ -168,7 +168,7 @@ fn defaults(app: &FilmcraftApp, id: &str) -> (Value, Value) {
             let item = s.state.project_selection.iter().find_map(|i| s.project.item(*i).and_then(|it| it.as_media()).filter(|m| m.info.has_audio()));
             match item {
                 Some(m) => {
-                    let n = m.info.audio.as_ref().map_or(2, |a| a.channels) as u16;
+                    let n = m.info.audio().map_or(2, |a| a.channels) as u16;
                     let map = m.interpret.audio_channels.clone().unwrap_or_else(|| AudioChannelMap::for_format(AudioChannels::Stereo, n));
                     (json!({"format": format_name(map.format), "clips": map.clips}), json!({"channels": n, "items": true}))
                 }

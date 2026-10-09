@@ -1059,7 +1059,7 @@ impl Exp<'_, '_> {
             self.w.close();
             self.w.close();
         }
-        if let Some(a) = &m.info.audio {
+        if let Some(a) = m.info.audio() {
             self.w.open("audio", &[]);
             self.w.open("samplecharacteristics", &[]);
             self.w.text("depth", a.bits_per_sample.unwrap_or(16));

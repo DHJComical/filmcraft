@@ -250,6 +250,9 @@ impl filmcraft_media::MediaSource for TimedSource {
     fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<filmcraft_frame::AudioBuffer> {
         self.0.audio(start, frames, sample_rate)
     }
+    fn audio_stream(&self, stream: usize, start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<filmcraft_frame::AudioBuffer> {
+        self.0.audio_stream(stream, start, frames, sample_rate)
+    }
 }
 
 /// The job's source provider: the pool, with source fetches timed (the time feeds

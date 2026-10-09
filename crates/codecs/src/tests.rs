@@ -70,7 +70,7 @@ fn mjpeg_mov_with_pcm() {
 fn aac_mp4_decodes() {
     let Some(b) = fixture("tone_aac.mp4", &["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:d=3", "-c:a", "aac", "-b:a", "128k"]) else { return };
     let src = crate::open_bytes("tone_aac.mp4", b).unwrap();
-    assert!(src.info().audio.as_ref().unwrap().codec.contains("AAC"));
+    assert!(src.info().audio().unwrap().codec.contains("AAC"));
     // read in the middle (random access) and sequentially
     let a = src.audio(48_000, 4800, 48_000).unwrap();
     let p = a.peaks()[0];
@@ -510,7 +510,7 @@ fn check_opus(name: &str, channels: usize, expr: &str, extra: &[&str], container
     let src = crate::open_bytes(name, b).expect("open");
     let info = src.info().clone();
     assert_eq!(info.container, container);
-    let a = info.audio.as_ref().expect("audio");
+    let a = info.audio().expect("audio");
     assert_eq!((a.codec.as_str(), a.sample_rate, a.channels as usize), ("Opus", 48_000, channels));
     let d = info.duration.seconds();
     assert!((d - 3.0).abs() < 0.03, "{name}: duration {d}");

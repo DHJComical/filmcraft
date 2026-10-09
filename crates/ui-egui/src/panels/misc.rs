@@ -151,7 +151,7 @@ pub fn info(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 line(ui, tl!("Video:"), format!("{} fps, {} x {} ({:.4})", v.frame_rate.label(), v.width, v.height, v.par.0 as f32 / v.par.1 as f32));
                 line(ui, tl!("Codec:"), v.codec.clone());
             }
-            if let Some(a) = &m.info.audio {
+            if let Some(a) = m.info.audio() {
                 line(ui, tl!("Audio:"), format!("{} Hz - {} ch - {}", a.sample_rate, a.channels, a.codec));
             }
         }
