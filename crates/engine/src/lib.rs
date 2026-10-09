@@ -553,10 +553,10 @@ impl Session {
         let Some(p) = self.persistence.as_mut() else { return };
         for ev in p.drain_events() {
             match ev {
-                autosave::WorkerEvent::SavedProject { path, revision } => {
-                    if self.path.as_deref() == Some(path.as_str()) && revision > self.saved_revision && revision <= self.revision {
-                        self.saved_revision = revision;
-                    }
+                autosave::WorkerEvent::SavedProject { path, revision }
+                    if self.path.as_deref() == Some(path.as_str()) && revision > self.saved_revision && revision <= self.revision =>
+                {
+                    self.saved_revision = revision;
                 }
                 autosave::WorkerEvent::Error(m) => {
                     self.log.push(panels::Level::Error, "autosave", m.clone());
@@ -1107,3 +1107,5 @@ mod trim_tests;
 mod vfx_tests;
 #[cfg(test)]
 mod voiceover_tests;
+#[cfg(test)]
+mod wasm_clock_tests;

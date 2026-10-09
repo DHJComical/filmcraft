@@ -663,7 +663,9 @@ pub fn std_volumes() -> Vec<Volume> {
     v
 }
 
-/// The desktop user's home directory.
+/// The desktop user's home directory. Windows prefers `USERPROFILE`: shells like Git Bash set
+/// `HOME` to a Unix-style path (`/c/Users/…`) that native file APIs cannot open.
 pub fn std_home_dir() -> Option<String> {
-    std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok()).filter(|h| !h.is_empty())
+    let vars = if cfg!(windows) { ["USERPROFILE", "HOME"] } else { ["HOME", "USERPROFILE"] };
+    vars.iter().find_map(|v| std::env::var(v).ok().filter(|h| !h.is_empty()))
 }

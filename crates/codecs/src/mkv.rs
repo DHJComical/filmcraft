@@ -8,6 +8,9 @@
 //! subtracts `CodecDelay` from timestamps, so the pre-skip samples land before zero and are never
 //! read; random access decodes `SeekPreRoll` (at least [`crate::audio::OPUS_PRE_ROLL`]) of preceding
 //! packets before the target. Packet starts are accumulated from TOC durations (see [`opus_starts`]).
+//!
+//! AAC, MPEG audio and AC-3 packets each decode to a fixed number of samples, which millisecond
+//! timestamps can't express: their packets run on from one another (see [`audio_starts`]).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -58,35 +61,71 @@ pub struct MkvSource {
     audios: Vec<MkvAudio>,
 }
 
+/// Audio packet start positions in source sample frames.
+///
+/// Block timestamps are quantised to `TimestampScale` (usually 1 ms), so they are only accurate to a
+/// tick: a 1024-sample AAC frame at 48 kHz lasts 21.33 ms. Packets that all decode to the same
+/// length (AAC, MPEG audio, AC-3) therefore run on from one another, resynchronising to the
+/// timestamp only across gaps of more than half a packet (and more than two ticks); see
+/// [`crate::audio::contiguous_starts`]. Opus packets: [`opus_starts`]. Other codecs start at their
+/// timestamps.
+fn audio_starts(file: &MkvFile, bytes: &crate::Src, ti: usize, rate: i64) -> Vec<i64> {
+    use crate::audio::{FixedFrames, PacketTime, contiguous_starts, fixed_packet_samples};
+    let Some(t) = file.tracks.get(ti) else { return Vec::new() };
+    if let Some(h) = opus_head(&t.codec) {
+        return opus_starts(file, bytes, ti, &h, rate);
+    }
+    let (n, d) = tb(t);
+    let at = |pts: i64| (pts as i128 * n as i128 * rate as i128 / d as i128) as i64;
+    let first = || file.read_sample(bytes, ti, 0).unwrap_or_default();
+    let out_rate = u32::try_from(rate).unwrap_or(0);
+    let frame = match &t.codec {
+        Codec::Aac { asc } => fixed_packet_samples(FixedFrames::Aac(asc), &[], out_rate),
+        Codec::Mp3 | Codec::Mp2 => fixed_packet_samples(FixedFrames::MpegAudio, &first(), out_rate),
+        Codec::Ac3 => fixed_packet_samples(FixedFrames::Ac3, &first(), out_rate),
+        _ => None,
+    };
+    let Some(frame) = frame else {
+        return t.samples.iter().map(|s| at(s.pts)).collect();
+    };
+    let packets = t.samples.iter().map(|s| PacketTime { stamp: at(s.pts), stamped: own_stamp(s), samples: Some(frame) });
+    contiguous_starts(packets, (frame / 2).max(stamp_tolerance(t, rate)))
+}
+
 /// Sample-exact Opus packet start positions (48 kHz frames, pre-skip removed).
 ///
-/// Block timestamps are quantised to `TimestampScale` (usually 1 ms) and the demuxer subtracts a
-/// rounded `CodecDelay`, so they are only accurate to a tick. Starts are therefore accumulated from
-/// each packet's TOC duration, resynchronising to the timestamp only across real gaps (more than
-/// two ticks off). Pre-skip is the exact `CodecDelay` (or the header's pre-skip when it is absent).
+/// The demuxer also subtracts a rounded `CodecDelay` from the timestamps. Starts are accumulated
+/// from each packet's TOC duration, resynchronising to the timestamp only across real gaps (more
+/// than two ticks off). Pre-skip is the exact `CodecDelay` (or the header's pre-skip when it is
+/// absent).
 fn opus_starts(file: &MkvFile, bytes: &crate::Src, ti: usize, head: &filmcraft_opus::OpusHead, rate: i64) -> Vec<i64> {
-    let t = &file.tracks[ti];
+    let Some(t) = file.tracks.get(ti) else { return Vec::new() };
     let (n, d) = tb(t);
     let scale_ns = (n as i128 * 1_000_000_000 / d as i128).max(1);
     let delay_ns = t.codec_delay_ns as i128;
     // The demuxer's rounding of CodecDelay to ticks (half away from zero), undone here.
     let delay_ticks = ((delay_ns + scale_ns / 2) / scale_ns) as i64;
     let skip = if t.codec_delay_ns > 0 { (delay_ns * rate as i128 / 1_000_000_000) as i64 } else { head.pre_skip as i64 };
-    let at = |pts: i64| ((pts + delay_ticks) as i128 * n as i128 * rate as i128 / d as i128) as i64 - skip;
-    let tolerance = (2 * scale_ns * rate as i128 / 1_000_000_000) as i64 + 1;
-    let mut starts = Vec::with_capacity(t.samples.len());
-    let mut next: Option<i64> = None;
-    for (i, s) in t.samples.iter().enumerate() {
-        let stamped = at(s.pts);
-        let start = match next {
-            Some(p) if (p - stamped).abs() <= tolerance => p,
-            _ => stamped,
-        };
-        starts.push(start);
-        let dur = file.read_sample(bytes, ti, i).ok().and_then(|p| crate::audio::opus_packet_samples(&p));
-        next = dur.map(|k| start + k as i64);
-    }
-    starts
+    let at = |pts: i64| ((pts.saturating_add(delay_ticks) as i128 * n as i128 * rate as i128 / d as i128) as i64).saturating_sub(skip);
+    let packets = t.samples.iter().enumerate().map(|(i, s)| crate::audio::PacketTime {
+        stamp: at(s.pts),
+        stamped: own_stamp(s),
+        samples: file.read_sample(bytes, ti, i).ok().and_then(|p| crate::audio::opus_packet_samples(&p)).map(|k| k as i64),
+    });
+    crate::audio::contiguous_starts(packets, stamp_tolerance(t, rate))
+}
+
+/// Two timestamp ticks in sample frames at `rate`, plus one: how far a packet's Matroska timestamp
+/// can be from its exact start.
+fn stamp_tolerance(t: &filmcraft_matroska::Track, rate: i64) -> i64 {
+    let (n, d) = tb(t);
+    i64::try_from(2 * n as i128 * rate as i128 / d as i128).unwrap_or(i64::MAX).saturating_add(1)
+}
+
+/// Whether a sample's timestamp is its own: frames after the first in a laced block without a
+/// duration repeat the block's timestamp.
+fn own_stamp(s: &filmcraft_matroska::Sample) -> bool {
+    s.lace == 0 || s.duration > 0
 }
 
 /// The parsed `OpusHead` of an `A_OPUS` track.
@@ -336,12 +375,7 @@ impl MkvSource {
             .filter_map(|(&i, ainfo)| {
                 let t = file.tracks.get(i)?;
                 let rate = ainfo.sample_rate as i64;
-                let (n, d) = tb(t);
-                let at = |pts: i64| (pts as i128 * n as i128 * rate as i128 / d as i128) as i64;
-                let starts = match opus_head(&t.codec) {
-                    Some(h) => opus_starts(&file, &bytes, i, &h, rate),
-                    None => t.samples.iter().map(|s| at(s.pts)).collect(),
-                };
+                let starts = audio_starts(&file, &bytes, i, rate);
                 let preroll = match t.codec {
                     Codec::Opus { .. } => {
                         let container = (t.seek_pre_roll_ns as u128 * rate as u128).div_ceil(1_000_000_000) as i64;

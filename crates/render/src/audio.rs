@@ -338,6 +338,18 @@ pub fn clip_signal(item: &TrackItem, start: i64, frames: usize, sr: u32, sources
     Some(out)
 }
 
+/// Whether a clip plays one source channel on both sides: a mono source, or one picked channel
+/// (Modify ▸ Audio Channels, Breakout to Mono). Loudness Auto-Match measures such a clip as the one
+/// channel it is, as BS.1770 (and ffmpeg's `ebur128`) measure a mono programme, not as the
+/// dual-mono pair [`clip_signal`] plays, which reads 3 LU louder. `None` when the clip has no
+/// audio source.
+pub fn clip_is_mono(item: &TrackItem, sources: &dyn SourceProvider) -> Option<bool> {
+    let src = sources.source(item.item)?;
+    let available = src.info().audio_streams.get(item.audio_stream)?.channels as usize;
+    let (left, right) = source_pair(item, available);
+    Some(left == right)
+}
+
 /// The clip's audio (after speed/reverse) for timeline samples `[x0, x0 + len)` as `w` channels
 /// (2: stereo, mono sources on both sides; 6: 5.1), with silence outside the clip.
 fn raw_channels(item: &TrackItem, src: SourceAudio, x0: i64, len: usize, sr: u32, w: usize) -> Vec<Vec<f32>> {

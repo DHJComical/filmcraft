@@ -131,9 +131,16 @@ pub(crate) fn named_clips(s: &Session, spec: &CommandSpec, p: &Value) -> Option<
     let clips: Vec<ClipId> = named_ids(spec, p, "clips", "clip")?.into_iter().map(ClipId).filter(|c| seq.find_item(*c).is_some()).collect();
     (!clips.is_empty()).then_some(clips)
 }
-/// Project items named explicitly in `items` / `item`, likewise.
+/// Project items named explicitly in `items` / `item`, likewise. The Project panel's selection
+/// holds bins beside items (one id space, see `project.select`), so a bin named here counts too;
+/// the project's own top bin does not, since no command acts on it (#244).
 pub(crate) fn named_items(s: &Session, spec: &CommandSpec, p: &Value) -> Option<Vec<ItemId>> {
-    let items: Vec<ItemId> = named_ids(spec, p, "items", "item")?.into_iter().map(ItemId).filter(|i| s.project.item(*i).is_some()).collect();
+    let root = s.project.root.id;
+    let exists = |i: &ItemId| {
+        let b = filmcraft_project::BinId(i.0);
+        s.project.item(*i).is_some() || (b != root && s.project.root.find_bin(b).is_some())
+    };
+    let items: Vec<ItemId> = named_ids(spec, p, "items", "item")?.into_iter().map(ItemId).filter(exists).collect();
     (!items.is_empty()).then_some(items)
 }
 
@@ -1147,7 +1154,7 @@ fn build() -> Vec<CommandSpec> {
             "Media…",
             ["File", "Export"],
             None,
-            r#"{"path":str,"preset":str?,"settings":ExportSettings?,"format":"h264|hevc|prores|dnxhr|apv|mjpeg|mxf-op1a|mxf-opatom|png|tiff|bmp|gif|wav|aiff"?,"width":u32?,"height":u32?,"fps":f64?,"bitrateKbps":u32?,"bitrateMode":"cbr|vbr1Pass|vbr2Pass"?,"hardwareEncoding":"off|auto"?,"scale":f32=1,"audio":bool=true,"quality":0..100,"burnCaptions":bool=false,"captionSidecar":"srt|vtt"?,"loudnessLufs":f64?,"proresProfile":"proxy|lt|standard|hq"?,"dnxProfile":"lb|sq|hq|hqx"?,"apvProfile":"422-10|422-12|444-10|444-12"?,"mxfVideoCodec":"dnxhr|proRes|h264"?,"sequence":id?,"range":"entire|inOut|workArea|custom"?,"startSeconds":f64?,"endSeconds":f64?,"wait":bool=false}"#,
+            r#"{"path":str,"preset":str?,"settings":ExportSettings?,"format":"h264|hevc|prores|dnxhr|apv|mjpeg|mxf-op1a|mxf-opatom|png|tiff|bmp|gif|wav|aiff"?,"width":u32?,"height":u32?,"fps":f64?,"bitrateKbps":u32?,"bitrateMode":"cbr|vbr1Pass|vbr2Pass"?,"hardwareEncoding":"off|auto"?,"scale":f32=1,"audio":bool=true,"quality":0..100,"burnCaptions":bool=false,"alpha":bool=false,"captionSidecar":"srt|vtt"?,"loudnessLufs":f64?,"proresProfile":"proxy|lt|standard|hq"?,"dnxProfile":"lb|sq|hq|hqx"?,"apvProfile":"422-10|422-12|444-10|444-12"?,"mxfVideoCodec":"dnxhr|proRes|h264"?,"sequence":id?,"range":"entire|inOut|workArea|custom"?,"startSeconds":f64?,"endSeconds":f64?,"wait":bool=false}"#,
             has_seq,
             crate::export_tools::export_media
         ),
@@ -1589,41 +1596,70 @@ fn build() -> Vec<CommandSpec> {
             "Sequence Settings…",
             ["Sequence"],
             None,
-            r#"{"width":u32?,"height":u32?,"fps":f64?,"name":str?,"sampleRate":u32?,"mix":"Stereo|Mono|5.1|Adaptive"?}"#,
+            r#"{"width":u32?,"height":u32?,"fps":f64?,"name":str?,"sampleRate":u32?,"mix":"Stereo|Mono|5.1|Adaptive"?,"dropFrame":bool?,"maxRenderQuality":bool?,"workingSpace":"rec709"|"rec2100-pq"|"rec2100-hlg"?,"wideGamut":bool?,"autoToneMap":bool?,"scaleMotion":bool=false}"#,
             has_seq,
             |s, p| {
+                const CMD: &str = "sequence.settings";
                 let id = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
-                let fps = fps_p(p, "sequence.settings")?;
+                let fps = fps_p(p, CMD)?;
                 let mix = match str_p(p, "mix") {
-                    Some(m) => Some(
-                        crate::mixer::channels_from(m).ok_or_else(|| bad("sequence.settings", format!("unknown mix `{m}` (Stereo, Mono, 5.1, Adaptive)")))?,
-                    ),
+                    Some(m) => Some(crate::mixer::channels_from(m).ok_or_else(|| bad(CMD, format!("unknown mix `{m}` (Stereo, Mono, 5.1, Adaptive)")))?),
                     None => None,
                 };
+                let working = match str_p(p, "workingSpace") {
+                    Some(w) => Some(filmcraft_color::WorkingSpace::parse(w).ok_or_else(|| bad(CMD, format!("unknown working space `{w}`")))?),
+                    None => None,
+                };
+                let drop_frame = bool_p(p, "dropFrame");
+                let rate = fps.or_else(|| s.active_sequence().map(|q| q.settings.frame_rate)).unwrap_or(FrameRate::FPS_23_976);
+                if drop_frame == Some(true) && !rate.supports_drop_frame() {
+                    return Err(bad(CMD, format!("drop-frame timecode needs a 29.97, 59.94 or 119.88 fps timebase, not {rate}")));
+                }
+                let scale_motion = bool_p(p, "scaleMotion").unwrap_or(false);
                 let p = p.clone();
-                s.edit("Sequence Settings", |pr, _| {
+                let scaled = s.edit("Sequence Settings", |pr, _| {
                     if let Some(n) = str_p(&p, "name") {
                         pr.item_mut(id).ok_or(EngineError::NoSequence)?.name = n.to_string();
                     }
                     let q = pr.sequence_mut(id).ok_or(EngineError::NoSequence)?;
-                    if let Some(w) = checked_u32_p(&p, "width", "sequence.settings")? {
+                    let old_size = (q.settings.width, q.settings.height);
+                    if let Some(w) = checked_u32_p(&p, "width", CMD)? {
                         q.settings.width = w;
                     }
-                    if let Some(h) = checked_u32_p(&p, "height", "sequence.settings")? {
+                    if let Some(h) = checked_u32_p(&p, "height", CMD)? {
                         q.settings.height = h;
                     }
                     if let Some(f) = fps {
                         q.settings.frame_rate = f;
                     }
-                    if let Some(sr) = checked_u32_p(&p, "sampleRate", "sequence.settings")? {
+                    if let Some(sr) = checked_u32_p(&p, "sampleRate", CMD)? {
                         q.settings.sample_rate = sr;
                     }
                     if let Some(m) = mix {
                         q.settings.audio_master = m;
                     }
-                    q.settings.validate().map_err(|e| bad("sequence.settings", e))
+                    if let Some(df) = drop_frame {
+                        q.settings.drop_frame = df;
+                    }
+                    if let Some(v) = bool_p(&p, "maxRenderQuality") {
+                        q.settings.max_render_quality = v;
+                    }
+                    let c = &mut q.settings.color;
+                    if let Some(w) = working {
+                        c.working = w;
+                    }
+                    if let Some(v) = bool_p(&p, "wideGamut") {
+                        c.wide_gamut = v;
+                    }
+                    if let Some(v) = bool_p(&p, "autoToneMap") {
+                        c.auto_tone_map = v;
+                    }
+                    q.settings.working_space = q.settings.color.working.label().into();
+                    q.settings.validate().map_err(|e| bad(CMD, e))?;
+                    let new_size = (q.settings.width, q.settings.height);
+                    Ok(if scale_motion { edit::frame_size::scale_motion(q, old_size, new_size) } else { 0 })
                 })?;
-                Ok(Value::Null)
+                Ok(json!({"scaledClips": scaled}))
             }
         ),
         cmd!("sequence.renderEffectsInToOut", "Render Effects In to Out", ["Sequence"], Some("Enter"), r#"{"wait":bool=false}"#, has_seq, |s, p| {
@@ -1685,14 +1721,15 @@ fn build() -> Vec<CommandSpec> {
             })?;
             Ok(Value::Null)
         }),
+        // With no In / Out mark, like Premiere: the start / end of the sequence (#208).
         cmd!("markers.goToIn", "Go to In", ["Markers"], Some("Shift+I"), "{}", has_seq, |s, _| {
-            if let Some(i) = s.active_sequence().and_then(|q| q.mark_in) {
+            if let Some(i) = s.active_sequence().map(|q| q.mark_in.unwrap_or(Tick::ZERO)) {
                 s.set_playhead(i);
             }
             Ok(Value::Null)
         }),
         cmd!("markers.goToOut", "Go to Out", ["Markers"], Some("Shift+O"), "{}", has_seq, |s, _| {
-            if let Some(o) = s.active_sequence().and_then(|q| q.mark_out) {
+            if let Some(o) = s.active_sequence().map(|q| q.mark_out.unwrap_or_else(|| q.duration())) {
                 s.set_playhead(o);
             }
             Ok(Value::Null)
