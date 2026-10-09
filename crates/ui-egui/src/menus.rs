@@ -310,6 +310,12 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
             filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session))?;
             return crate::panels::interchange_export::open(app, ctx, id);
         }
+        // File ▸ Export ▸ Media… opens the Export mode, like ⌘M (#382); with a path it exports directly.
+        "file.exportMedia" if params.get("path").is_none() => {
+            filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session))?;
+            app.ui.mode = Mode::Export;
+            return Ok(json!({"mode": "export"}));
+        }
         // Audio Gain from the menu or G opens the dialog; with params it applies directly.
         "clip.audioGain" if params.as_object().is_none_or(|m| m.is_empty()) => {
             filmcraft_engine::find_command("clip.audioGain").map_or(Ok(()), |c| (c.enabled)(&app.session))?;
@@ -351,6 +357,13 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
             app.dialog = Some(crate::Dialog::DeleteTracks);
             return Ok(json!({"dialog": "deleteTracks"}));
         }
+        // Sequence Settings… from the menu opens the dialog; with params the engine command applies
+        // them directly.
+        "sequence.settings" if params.as_object().is_none_or(|m| m.is_empty()) => {
+            filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session))?;
+            crate::panels::sequence_settings::open(app);
+            return Ok(json!({"dialog": "sequenceSettings"}));
+        }
         "sequence.colorSettings" if params.as_object().is_none_or(|m| m.is_empty()) => {
             filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session))?;
             crate::panels::color_dialogs::open_sequence(app);
@@ -388,6 +401,7 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
         || (id == "file.save" && params.get("path").is_none() && app.session.path.is_none())
         || (matches!(id, "captions.import" | "captions.export") && params.get("path").is_none())
         || (id == "graphics.newFromFile" && params.get("path").is_none())
+        || (crate::EXPORT_SAVE_DIALOGS.iter().any(|(c, ..)| *c == id) && params.get("path").is_none())
     {
         return app.file_dialog(id, &params);
     }
@@ -502,16 +516,22 @@ pub fn shortcut_text(s: &str) -> String {
     Chord::parse(s).map(|c| c.display(Platform::current())).unwrap_or_else(|_| s.to_string())
 }
 
-/// Parse "Cmd+Shift+K" into modifiers + key.
+/// Parse "Cmd+Shift+K" into the modifiers a chord requires + its key. Off macOS the Control key
+/// is the primary modifier, so `Ctrl` and `Cmd` are one key and both mean `command` (the engine's
+/// `Chord::effective` says the same): a physical Ctrl press carries `command` there, and egui's
+/// matching asks only for what the pattern names, so a `Ctrl+…` chord matches a `Cmd+…` binding
+/// and the other way round (#245). On a Mac they stay two keys.
 pub fn parse_shortcut(s: &str) -> Option<(egui::Modifiers, egui::Key)> {
     let mut m = egui::Modifiers::NONE;
     let mut key = None;
     let parts: Vec<&str> = if s == "+" { vec!["+"] } else { s.split('+').collect() };
+    let mac = cfg!(target_os = "macos");
     for p in parts {
         match p {
             "Cmd" => m.command = true,
             "Shift" => m.shift = true,
             "Alt" => m.alt = true,
+            "Ctrl" if !mac => m.command = true,
             "Ctrl" => m.ctrl = true,
             k => {
                 key = match k {
@@ -637,4 +657,34 @@ fn menu_entry(ui: &mut egui::Ui, it: &MenuItem) -> bool {
         ui.painter().line_segment([c + egui::vec2(-1.0, 3.0), c + egui::vec2(4.5, -3.5)], st);
     }
     r.clicked()
+}
+
+#[cfg(test)]
+mod parse_shortcut_tests {
+    use super::parse_shortcut;
+
+    /// Off macOS `Ctrl` and `Cmd` are the same key, so either spelling parses to the modifiers a
+    /// physical Ctrl press carries and matches a binding written the other way (#245).
+    #[test]
+    fn ctrl_and_cmd_are_one_key_off_macos() {
+        let (ctrl, k) = parse_shortcut("Ctrl+Z").unwrap();
+        let (cmd, k2) = parse_shortcut("Cmd+Z").unwrap();
+        assert_eq!((k, k2), (egui::Key::Z, egui::Key::Z));
+        if cfg!(target_os = "macos") {
+            assert_eq!((ctrl.ctrl, ctrl.command), (true, false));
+            assert_eq!((cmd.ctrl, cmd.command), (false, true));
+            assert!(!ctrl.matches_logically(cmd) && !cmd.matches_logically(ctrl), "two different keys on a Mac");
+        } else {
+            assert_eq!((ctrl.ctrl, ctrl.command), (false, true));
+            assert_eq!(ctrl, cmd, "one key off a Mac");
+            // what egui-winit reports for the physical key, and a bare `command` as tests send it
+            let physical = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+            assert!(physical.matches_logically(cmd) && physical.matches_logically(ctrl));
+            assert!(egui::Modifiers::COMMAND.matches_logically(ctrl));
+        }
+        assert!(!parse_shortcut("Z").unwrap().0.matches_logically(cmd), "a bare key never stands in for the chord");
+        let (m, k) = parse_shortcut("Cmd+Shift+K").unwrap();
+        assert!(m.command && m.shift && !m.alt && k == egui::Key::K);
+        assert_eq!(parse_shortcut("+").map(|(_, k)| k), Some(egui::Key::Plus));
+    }
 }

@@ -12,7 +12,7 @@ use filmcraft_time::FrameRate;
 use rayon::prelude::*;
 
 use crate::settings::{ExportEffects, Placement, Scaling, TextOverlay};
-use crate::{ExportError, ExportSettings, Result};
+use crate::{ExportError, ExportSettings, Format, Result};
 
 /// Where the rendered picture lands in the output frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -61,6 +61,8 @@ pub(crate) struct Pipeline {
     geom: Geometry,
     opts: RenderOptions,
     pub hdr_out: bool,
+    /// Keep straight alpha in the RGBA8 output instead of flattening over black.
+    alpha: bool,
     out_tf: Option<filmcraft_color::OutputTransform>,
     effects: ExportEffects,
     overlay: Option<Image>,
@@ -116,6 +118,7 @@ impl Pipeline {
             geom,
             opts,
             hdr_out,
+            alpha: settings.alpha && matches!(settings.format, Format::PngSequence | Format::TiffSequence),
             out_tf,
             effects,
             overlay,
@@ -144,7 +147,7 @@ impl Pipeline {
             filmcraft_frame::pool::recycle_f32(img.px);
             return (Vec::new(), out);
         }
-        let mut rgba = img.over_black_rgba8();
+        let mut rgba = if self.alpha { img.to_rgba8() } else { img.over_black_rgba8() };
         // the float image is not needed any more: its buffer serves the next frame's layers
         filmcraft_frame::pool::recycle_f32(img.px);
         if lim.enabled {
