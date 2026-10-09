@@ -98,6 +98,19 @@ impl Driver {
         self.harness.output().platform_output.cursor_icon
     }
 
+    /// Render the window to `<target tmp>/ui-screenshots/<name>.png` (needs a GPU).
+    fn screenshot(&mut self, name: &str) -> std::path::PathBuf {
+        self.frames(2);
+        let img = self.harness.render().expect("render");
+        let png = filmcraft_ui_egui::control::encode_png(img.as_raw(), img.width(), img.height()).expect("png");
+        let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ui-screenshots");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.png"));
+        std::fs::write(&path, png).unwrap();
+        eprintln!("screenshot: {}", path.display());
+        path
+    }
+
     /// The clip named `name` on V1.
     fn v1_clip(&self, name: &str) -> u64 {
         let seq = self.app().session.active_sequence().expect("sequence");
@@ -236,4 +249,23 @@ fn cursor_hit_test_and_press_agree_at_a_cut() {
     assert_eq!(d.cursor(), CursorIcon::Default, "no trim cursor mid-clip");
     let h = hit(&mut d, mid, json!({}));
     assert_eq!((h["clip"].as_u64(), h["kind"].clone()), (Some(city), Value::Null), "mid-clip: {h}");
+}
+
+/// Renders the hover bracket at the City_Night_Drive / Desert_Dunes cut to PNGs for visual
+/// review (needs a GPU): `cargo test -p filmcraft-ui-egui --test timeline_trim_ui -- --ignored
+/// hover_bracket_screenshots`. Yellow on City_Night_Drive's Out edge just left of the cut and on
+/// Desert_Dunes' In edge just right of it, red for the Ripple tool, both sides for the Rolling tool.
+#[test]
+#[ignore]
+fn hover_bracket_screenshots() {
+    let mut d = Driver::demo();
+    let dunes = d.v1_clip(DUNES);
+    let (cut, _, y) = d.edges(dunes);
+    for (tool, name, x) in
+        [("selection", "trim-out", cut - 3.0), ("selection", "trim-in", cut + 3.0), ("ripple", "ripple-in", cut + 3.0), ("rolling", "roll", cut + 3.0)]
+    {
+        d.ok("ui.set", json!({"tool": tool}));
+        d.hover(pos2(x, y));
+        d.screenshot(&format!("hover-{name}"));
+    }
 }

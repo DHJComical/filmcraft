@@ -1737,6 +1737,10 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
             _ => CursorIcon::Default,
         };
         ctx.set_cursor_icon(cur);
+        // the edge a press here would grab, and the trim it starts (#259)
+        if let Grab::Edge { track, clip, edge, kind } = g {
+            super::trim_monitor::paint_hover_bracket(ui.painter(), seq, layout, track, clip, edge, kind);
+        }
         // razor preview line
         if tool == Tool::Razor
             && let Grab::Other(Hit::Clip { track, .. }) = g

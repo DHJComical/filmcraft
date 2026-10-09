@@ -14,7 +14,8 @@
 //! `trimMonitor.playAround`, `trimMonitor.exit`.
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
-use filmcraft_project::{ItemKind, Sequence, Track};
+use filmcraft_edit::Edge;
+use filmcraft_project::{ClipId, ItemKind, Sequence, Track, TrackId};
 use filmcraft_time::{Tick, TimeDisplay, format_time};
 use serde_json::{Value, json};
 
@@ -22,6 +23,7 @@ use crate::FilmcraftApp;
 use crate::frames::{FrameKey, Target};
 use crate::icons::{self, Icon};
 use crate::panels::timeline::{Layout, Row};
+use crate::panels::timeline_hit::EdgeKind;
 use crate::theme::Tokens;
 
 /// Ripple edit points are red, roll / regular trims yellow (as in Premiere's timeline).
@@ -79,16 +81,37 @@ pub fn paint_edit_points(app: &FilmcraftApp, p: &egui::Painter, seq: &Sequence, 
         let col = if ep.kind == TrimKind::Ripple { RIPPLE_RED } else { ROLL_YELLOW };
         for (clip, out) in marks {
             let Some(it) = tr.item(clip) else { continue };
-            let x = layout.x_of(if out { it.end() } else { it.start });
-            let (y0, y1) = (row.rect.min.y + 2.0, row.rect.max.y - 2.0);
-            let dir = if out { -1.0 } else { 1.0 };
-            let xi = x + dir * 1.5;
-            let w = 6.0 * dir;
-            let s = Stroke::new(3.0, col);
-            p.line_segment([pos2(xi, y0), pos2(xi, y1)], s);
-            p.line_segment([pos2(xi, y0 + 1.0), pos2(xi + w, y0 + 1.0)], s);
-            p.line_segment([pos2(xi, y1 - 1.0), pos2(xi + w, y1 - 1.0)], s);
+            paint_bracket(p, layout.x_of(if out { it.end() } else { it.start }), row, out, col);
         }
+    }
+}
+
+/// A trim bracket at `x` on `row`, its arms pointing into the clip (left for an Out edge).
+pub fn paint_bracket(p: &egui::Painter, x: f32, row: &Row, out: bool, col: Color32) {
+    let (y0, y1) = (row.rect.min.y + 2.0, row.rect.max.y - 2.0);
+    let dir = if out { -1.0 } else { 1.0 };
+    let xi = x + dir * 1.5;
+    let w = 6.0 * dir;
+    let s = Stroke::new(3.0, col);
+    p.line_segment([pos2(xi, y0), pos2(xi, y1)], s);
+    p.line_segment([pos2(xi, y0 + 1.0), pos2(xi + w, y0 + 1.0)], s);
+    p.line_segment([pos2(xi, y1 - 1.0), pos2(xi + w, y1 - 1.0)], s);
+}
+
+/// The bracket on the edge a press would grab (#259): an edit point's bracket at half strength,
+/// red for a ripple and yellow otherwise; a roll marks both sides of the cut.
+pub fn paint_hover_bracket(p: &egui::Painter, seq: &Sequence, layout: &Layout, track: TrackId, clip: ClipId, edge: Edge, kind: EdgeKind) {
+    let Some(row) = layout.rows.iter().find(|r| r.track == track) else { return };
+    let Some(tr) = seq.track(track) else { return };
+    let full = if kind == EdgeKind::Ripple { RIPPLE_RED } else { ROLL_YELLOW };
+    let col = full.gamma_multiply(0.5);
+    let marks = match kind {
+        EdgeKind::Roll { left, right } => vec![(left, true), (right, false)],
+        _ => vec![(clip, edge == Edge::Out)],
+    };
+    for (c, out) in marks {
+        let Some(it) = tr.item(c) else { continue };
+        paint_bracket(p, layout.x_of(if out { it.end() } else { it.start }), row, out, col);
     }
 }
 
