@@ -636,8 +636,12 @@ fn sequence_from_clip(s: &mut Session, p: &Value) -> Result<Value> {
         settings.height = *height;
         settings.frame_rate = *rate;
     }
-    let channels = media_root(&s.project, first).and_then(|(_, m, _)| m.info.audio.as_ref().map(|a| a.channels)).unwrap_or(2);
-    let n_audio = media_root(&s.project, first).and_then(|(_, m, _)| m.interpret.audio_channels.as_ref().map(|a| a.clips.len())).unwrap_or(1).max(1);
+    let channels = media_root(&s.project, first).and_then(|(_, m, _)| m.info.audio().map(|a| a.channels)).unwrap_or(2);
+    let n_audio = media_root(&s.project, first)
+        .map(|(_, m, _)| {
+            crate::commands::audio_placement_specs(m.interpret.audio_channels.as_ref().map_or(&[], |a| a.clips.as_slice()), m.info.audio_streams.len()).len()
+        })
+        .unwrap_or(1);
     let n0 = s.history.undo.len();
     let name = pi.name.clone();
     let bin = s.project.root.parent_of(first).filter(|b| *b != s.project.root.id);
@@ -761,12 +765,15 @@ fn offline_file(s: &mut Session, p: &Value) -> Result<Value> {
             bitrate: None,
             hdr: None,
         }),
-        audio: has_a.then(|| filmcraft_media::AudioStreamInfo {
-            sample_rate: u64_p(p, "sampleRate").unwrap_or(48_000) as u32,
-            channels: u64_p(p, "channels").unwrap_or(2).max(1) as u32,
-            codec: String::new(),
-            bits_per_sample: None,
-        }),
+        audio_streams: has_a
+            .then(|| filmcraft_media::AudioStreamInfo {
+                sample_rate: u64_p(p, "sampleRate").unwrap_or(48_000) as u32,
+                channels: u64_p(p, "channels").unwrap_or(2).max(1) as u32,
+                codec: String::new(),
+                bits_per_sample: None,
+            })
+            .into_iter()
+            .collect(),
         container: String::new(),
         start_timecode: start_tc,
         file_size: None,
@@ -913,7 +920,7 @@ fn consolidate_duplicates(s: &mut Session, _: &Value) -> Result<Value> {
     for it in s.project.items.values() {
         if let ItemKind::Media(m) = &it.kind {
             // same file (or generator), interpretation and streams
-            let shape = (m.info.video.is_some(), m.info.audio.is_some(), m.info.duration);
+            let shape = (m.info.video.is_some(), m.info.has_audio(), m.info.duration);
             let key = serde_json::to_string(&(&m.media, &m.interpret, m.offline, shape)).unwrap_or_default();
             groups.entry(key).or_default().push(it.id);
         }
@@ -1249,7 +1256,7 @@ fn audio_channels(s: &mut Session, p: &Value) -> Result<Value> {
     let mut maps = Vec::new();
     for i in &items {
         let Some(m) = s.project.item(*i).and_then(|it| it.as_media()) else { continue };
-        let n = m.info.audio.as_ref().map_or(2, |a| a.channels) as u16;
+        let n = m.info.audio().map_or(2, |a| a.channels) as u16;
         let fmt = format.unwrap_or_else(|| m.interpret.audio_channels.as_ref().map_or(AudioChannels::Stereo, |a| a.format));
         let map = match &custom {
             Some(c) => {
@@ -1554,7 +1561,7 @@ fn breakout_to_mono(s: &mut Session, p: &Value) -> Result<Value> {
         for i in &items {
             let Some(it) = pr.item(*i).cloned() else { continue };
             let Some(m) = it.as_media() else { continue };
-            let n = m.info.audio.as_ref().map_or(1, |a| a.channels).max(1) as u16;
+            let n = m.info.audio().map_or(1, |a| a.channels).max(1) as u16;
             let bin = pr.root.parent_of(*i).filter(|b| *b != pr.root.id);
             for c in 0..n {
                 let suffix = match (n, c) {
@@ -1590,7 +1597,7 @@ fn extract_audio(s: &mut Session, p: &Value) -> Result<Value> {
     let mut out = Vec::new();
     for item in items {
         let (root, m, sub) = media_root(&s.project, item).ok_or_else(|| bad("clip.extractAudio", "not a media clip"))?;
-        let a = m.info.audio.clone().ok_or_else(|| bad("clip.extractAudio", "the clip has no audio"))?;
+        let a = m.info.audio().cloned().ok_or_else(|| bad("clip.extractAudio", "the clip has no audio"))?;
         let range = sub.unwrap_or(TimeRange::new(Tick::ZERO, m.info.duration));
         let dir = match str_p(p, "dir") {
             Some(d) => d.to_string(),

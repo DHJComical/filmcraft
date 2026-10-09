@@ -311,7 +311,7 @@ fn execute(
 
 fn estimate_bytes(m: &filmcraft_project::MediaClip, dur: Tick, pr: &Preset) -> u64 {
     let secs = dur.seconds().max(0.0);
-    let audio = m.info.audio.as_ref().map_or(0.0, |a| a.sample_rate as f64 * 2.0 * 2.0 * secs);
+    let audio = m.info.audio().map_or(0.0, |a| a.sample_rate as f64 * 2.0 * 2.0 * secs);
     let Some(v) = &m.info.video else { return audio as u64 };
     let fps = v.frame_rate.num as f64 / v.frame_rate.den.max(1) as f64;
     let px = (v.width * v.height) as f64 * (pr.scale * pr.scale) as f64;

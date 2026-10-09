@@ -358,7 +358,7 @@ pub(crate) fn default_seq_settings_for(info: &filmcraft_media::MediaInfo) -> Seq
         st.frame_rate = v.frame_rate;
         st.preset = format!("{}x{} {}", v.width, v.height, v.frame_rate.label());
     }
-    if let Some(a) = &info.audio {
+    if let Some(a) = info.audio() {
         st.sample_rate = a.sample_rate.max(8000);
     }
     st
@@ -490,6 +490,7 @@ fn set_matte_color(s: &mut Session, p: &Value) -> Result<Value> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AudioPlacementSpec {
     pub track_offset: usize,
+    pub audio_stream: usize,
     pub source_channels: Option<Vec<u16>>,
 }
 
@@ -497,10 +498,22 @@ pub(crate) struct AudioPlacementSpec {
 /// per clip): always at least one (on the destination track), then one per further entry on the
 /// tracks below. The count is capped at [`crate::sequence_tools::MAX_TRACKS`] (the map comes from
 /// project files and scripts: never trusted).
-pub(crate) fn audio_placement_specs(clips: &[Vec<u16>]) -> Vec<AudioPlacementSpec> {
-    let mut specs = vec![AudioPlacementSpec { track_offset: 0, source_channels: None }];
+pub(crate) fn audio_placement_specs(clips: &[Vec<u16>], streams: usize) -> Vec<AudioPlacementSpec> {
+    let mut specs = vec![AudioPlacementSpec { track_offset: 0, audio_stream: 0, source_channels: None }];
     let extra = clips.iter().skip(1).take(crate::sequence_tools::MAX_TRACKS.saturating_sub(1));
-    specs.extend(extra.enumerate().map(|(k, chans)| AudioPlacementSpec { track_offset: k.saturating_add(1), source_channels: Some(chans.clone()) }));
+    specs.extend(extra.enumerate().map(|(k, chans)| AudioPlacementSpec {
+        track_offset: k.saturating_add(1),
+        audio_stream: 0,
+        source_channels: Some(chans.clone()),
+    }));
+    // Interpret Footage's channel map describes stream 0; further container streams keep their
+    // own channel layouts and get one clip each, after any channel-map clips.
+    for stream in 1..streams.min(filmcraft_media::MAX_AUDIO_STREAMS) {
+        if specs.len() >= crate::sequence_tools::MAX_TRACKS {
+            break;
+        }
+        specs.push(AudioPlacementSpec { track_offset: specs.len(), audio_stream: stream, source_channels: None });
+    }
     specs
 }
 
@@ -592,7 +605,8 @@ pub(crate) fn place_item(
             // Modify ▸ Audio Channels with several audio clips: one per clip, on the tracks below
             let clips: Vec<Vec<u16>> =
                 p.item(item).and_then(|i| i.as_media()).and_then(|m| m.interpret.audio_channels.as_ref()).map(|m| m.clips.clone()).unwrap_or_default();
-            let specs = audio_placement_specs(&clips);
+            let streams = p.resolve_media(item).map_or(1, |(_, m, _)| m.info.audio_streams.len());
+            let specs = audio_placement_specs(&clips, streams);
             let first = p.sequence(seq_id).and_then(|q| q.audio_tracks.iter().position(|t| t.id == adest)).unwrap_or(0);
             // too few audio tracks below the destination: grow the sequence from the destination track
             let tracks = ensure_audio_tracks(p, seq_id, first, specs.len(), label)?;
@@ -606,8 +620,12 @@ pub(crate) fn place_item(
                     },
                 };
                 let mut b = a.clone();
+                b.audio_stream = spec.audio_stream;
                 if spec.track_offset > 0 {
                     b.id = ClipId(p.alloc_id());
+                }
+                if spec.audio_stream > 0 {
+                    b.source_channels.clear();
                 }
                 if let Some(chans) = spec.source_channels {
                     b.source_channels = chans;

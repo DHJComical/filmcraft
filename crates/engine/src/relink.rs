@@ -263,7 +263,7 @@ pub fn check_candidate(s: &Session, item: ItemId, path: &str, o: &MatchOptions) 
                     if info.video.is_some() != m.info.video.is_some() {
                         c.problems.push("video stream presence differs".into());
                     }
-                    if let (Some(a), Some(b)) = (&info.audio, &m.info.audio)
+                    if let (Some(a), Some(b)) = (info.audio(), m.info.audio())
                         && a.channels != b.channels
                     {
                         c.problems.push(format!("audio channels differ ({} vs {})", a.channels, b.channels));

@@ -279,10 +279,14 @@ impl MediaPool {
             return Some(s.clone());
         }
         match self.open_file(path, services) {
-            Ok(s) => {
+            Ok(s) if s.info().audio_streams.len() >= m.info.audio_streams.len() => {
                 let src: SharedSource = Arc::new(ProxySource { proxy: s, info: m.info.clone() });
                 self.proxies.write().unwrap_or_else(|e| e.into_inner()).insert(item, (key, src.clone()));
                 Some(src)
+            }
+            Ok(_) => {
+                log::warn!("proxy has fewer audio streams than the original: {path}; using full-resolution media");
+                None
             }
             Err(e) => {
                 // a missing proxy falls back to the full-resolution media
@@ -357,7 +361,7 @@ impl MediaSource for SlateSource {
         Ok(Arc::new((*f).clone().with_pts(req.time)))
     }
     fn audio(&self, _start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<AudioBuffer> {
-        Ok(AudioBuffer::silence(sample_rate, self.info.audio.as_ref().map_or(2, |a| a.channels as usize), frames))
+        Ok(AudioBuffer::silence(sample_rate, self.info.audio().map_or(2, |a| a.channels as usize), frames))
     }
 }
 
@@ -396,6 +400,9 @@ impl MediaSource for ProxySource {
     }
     fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<AudioBuffer> {
         self.proxy.audio(start, frames, sample_rate)
+    }
+    fn audio_stream(&self, stream: usize, start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<AudioBuffer> {
+        self.proxy.audio_stream(stream, start, frames, sample_rate)
     }
 }
 
