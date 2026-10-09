@@ -35,7 +35,7 @@ pub mod hardware_encode;
 pub mod hybrid;
 #[cfg(target_os = "windows")]
 pub mod media_foundation;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", all(target_os = "linux", target_pointer_width = "64")))]
 pub mod nvenc;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
@@ -59,6 +59,8 @@ pub enum Availability {
 /// harmless). Streams they do not take, and every stream while hardware decoding is Off, keep
 /// using FilmCraft's own decoders.
 pub fn register() -> Availability {
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    filmcraft_export::register_encoder(nvenc::export::factory);
     #[cfg(target_os = "macos")]
     {
         filmcraft_codecs::register_video_decoder(videotoolbox_factory);

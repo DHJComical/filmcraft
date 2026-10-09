@@ -26,7 +26,7 @@ Containment rules:
 1. The crate does not use `lints.workspace = true`. Its own `[lints]` table copies the workspace
    lints except `unsafe_code = "deny"` (not `forbid`), and adds
    `clippy::undocumented_unsafe_blocks = "deny"`. Only the FFI modules (`videotoolbox`, `media_foundation::gpu` / `media_foundation::mft`, and
-   `nvenc::ffi` / `nvenc::session` on Windows) carry `#[allow(unsafe_code)]`; the rest of the crate
+   `nvenc::ffi` / `nvenc::session` / `nvenc::device` on Windows and 64-bit Linux) carry `#[allow(unsafe_code)]`; the rest of the crate
    (the fallback logic in `hybrid`, the decoder logic in `media_foundation`, `annexb`, `biplanar`,
    the encoder logic in `nvenc`) has no `unsafe`.
 2. Every `unsafe` block has a `// SAFETY:` comment saying why it is sound.
@@ -101,3 +101,13 @@ there will not be one (pure Rust, clean-room: x265 is GPL), so `Format::Hevc` ex
 OS has a hardware encoder. Choosing the format is the opt-in, `filmcraft_export::available` asks a
 probe the platform crate registers, and what the hardware path does not take (two-pass, odd sizes,
 a machine without the encoder) is an error naming the reason instead of a different encoder.
+
+## Addendum: Linux NVENC H.264 encoding
+
+The existing NVENC session is shared with 64-bit Linux. Only device acquisition and driver loading
+are platform-specific: Windows retains the Direct3D device; Linux retains the first CUDA device's
+primary context through `libcuda.so.1`. `cuDevicePrimaryCtxRetain` does not push a context onto the
+calling thread's stack. The retained reference is released after the NVENC session and its buffers;
+other users' references are not reset. `libnvidia-encode.so.1` stays loaded with its function table.
+Both libraries come from the installed NVIDIA driver, not this project. Export registration on
+Linux does not claim that a hardware decoder is available. The same opt-in and fallback rules apply.

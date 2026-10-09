@@ -91,6 +91,9 @@ fn config(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettings) -
     if s.field_order != FieldOrder::Progressive {
         return Err("interlaced output".into());
     }
+    if w == 0 || h == 0 || !w.is_multiple_of(2) || !h.is_multiple_of(2) {
+        return Err("NVENC needs nonzero even dimensions".into());
+    }
     if w > u32::from(u16::MAX) || h > u32::from(u16::MAX) {
         return Err(format!("{w}x{h} does not fit an MP4 sample entry"));
     }
@@ -107,7 +110,7 @@ fn config(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettings) -
         height: h,
         fps,
         bitrate_kbps: kbps,
-        max_bitrate_kbps: s.max_bitrate_kbps.filter(|m| *m >= kbps).unwrap_or(kbps / 2 * 3),
+        max_bitrate_kbps: s.max_bitrate_kbps.filter(|m| *m >= kbps).unwrap_or_else(|| kbps.saturating_add(kbps / 2)),
         cbr: s.bitrate_mode == BitrateMode::Cbr,
         keyint: s.keyframe_distance.filter(|k| *k > 0).unwrap_or_else(|| (f64::from(fps.0) / f64::from(fps.1) * 2.0).round().max(1.0) as u32),
         profile: match s.h264_profile {
@@ -123,6 +126,17 @@ fn config(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettings) -
 
 /// The Export encoder factory (see the module documentation).
 pub fn factory(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettings) -> Option<Result<Box<dyn VideoEncoder>>> {
+    factory_with(format, w, h, rate, s, NvencH264::new)
+}
+
+fn factory_with(
+    format: Format,
+    w: u32,
+    h: u32,
+    rate: FrameRate,
+    s: &ExportSettings,
+    open: impl FnOnce(&Config) -> std::result::Result<NvencH264, String>,
+) -> Option<Result<Box<dyn VideoEncoder>>> {
     if s.hardware_encoding != HardwareEncoding::Auto || format != Format::H264 {
         return None;
     }
@@ -135,7 +149,7 @@ pub fn factory(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettin
         Ok(c) => c,
         Err(why) => return declined(&why),
     };
-    match NvencH264::new(&cfg) {
+    match open(&cfg) {
         Ok(enc) => {
             filmcraft_export::note_hw_encode_session();
             Some(Ok(Box::new(NvencEncoder { enc, w, h, rate, y: Vec::new(), u: Vec::new(), v: Vec::new() })))
@@ -147,6 +161,45 @@ pub fn factory(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn off_and_unsupported_settings_never_open_the_driver() {
+        let declined = |format, w, h, s: &ExportSettings| {
+            assert!(factory_with(format, w, h, FrameRate::FPS_24, s, |_| panic!("must not open the driver")).is_none());
+        };
+        let mut s = ExportSettings { hardware_encoding: HardwareEncoding::Off, ..Default::default() };
+        declined(Format::H264, 640, 360, &s);
+        s.hardware_encoding = HardwareEncoding::Auto;
+        declined(Format::ProRes, 640, 360, &s);
+        declined(Format::H264, 641, 360, &s);
+        declined(Format::H264, 0, 360, &s);
+        s.h264_pass = H264Pass::First;
+        declined(Format::H264, 640, 360, &s);
+        s.h264_pass = H264Pass::Single;
+        s.field_order = FieldOrder::UpperFirst;
+        declined(Format::H264, 640, 360, &s);
+    }
+
+    #[test]
+    fn missing_or_rejecting_driver_declines_for_software_fallback() {
+        let s = ExportSettings { hardware_encoding: HardwareEncoding::Auto, ..Default::default() };
+        let mut attempted = false;
+        assert!(
+            factory_with(Format::H264, 640, 360, FrameRate::FPS_24, &s, |cfg| {
+                attempted = true;
+                assert_eq!((cfg.width, cfg.height), (640, 360));
+                Err("no NVIDIA encoder driver".into())
+            })
+            .is_none()
+        );
+        assert!(attempted);
+    }
+
+    #[test]
+    fn bitrate_ceiling_does_not_wrap() {
+        let s = ExportSettings { bitrate_kbps: u32::MAX, ..Default::default() };
+        assert_eq!(config(Format::H264, 640, 360, FrameRate::FPS_24, &s).unwrap().max_bitrate_kbps, u32::MAX);
+    }
 
     #[test]
     fn composition_offsets_saturate() {

@@ -1,7 +1,7 @@
-//! NVIDIA NVENC H.264 hardware encoding (Windows).
+//! NVIDIA NVENC H.264 hardware encoding (Windows and 64-bit Linux).
 //!
-//! The encoder runs on the GPU's NVENC engine through the driver's `nvEncodeAPI64.dll` (API 12.1,
-//! [`ffi`]; no CUDA, no SDK to install): pictures go in as NV12 input buffers, the Annex B output
+//! The encoder runs through the driver's `nvEncodeAPI64.dll` on Windows or
+//! `libnvidia-encode.so.1` on Linux (API 12.1, [`ffi`]; no SDK to install): pictures go in as NV12 input buffers, the Annex B output
 //! comes back as length-prefixed H.264 samples with the parameter sets split out for the `avcC`.
 //! [`export`] plugs it into Export as an alternative to the software encoder.
 //!
@@ -10,11 +10,13 @@
 //!    ──► NV12 input buffer ──NVENC──► Annex B ──► length-prefixed samples + avcC
 //! ```
 //!
-//! `unsafe` is confined to `ffi` (data) and `session` (every driver call); this module is safe
+//! `unsafe` is confined to `ffi` (data), `device` (device lifetime) and `session` (driver calls); this module is safe
 //! code. Hardware encoding never replaces an export that works in software: the factory declines
 //! what NVENC cannot do (no NVIDIA GPU or driver, sizes, HDR, two-pass, MXF...) and the software
 //! encoder takes over.
 
+#[allow(unsafe_code)]
+mod device;
 pub mod export;
 #[allow(unsafe_code)]
 mod ffi;

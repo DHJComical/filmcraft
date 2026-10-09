@@ -1,4 +1,4 @@
-//! An NVENC H.264 encode session: the driver library, the Direct3D 11 device it is opened on, the
+//! An NVENC H.264 encode session: the driver library, the device it is opened on, the
 //! encoder configuration, and the input / output buffers (every call into the driver).
 //!
 //! FFI module (docs/adr/0001-platform-ffi.md): every `unsafe` block has a `// SAFETY:` comment, the
@@ -7,21 +7,14 @@
 use std::ffi::{CStr, c_void};
 use std::sync::OnceLock;
 
-use windows::Win32::Foundation::HMODULE;
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
-use windows::Win32::Graphics::Direct3D11::{D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device};
-use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory1};
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
-use windows::core::{Interface, PCSTR, w};
-
+use super::device::Device;
 use super::ffi::*;
-
-/// NVIDIA's PCI vendor id.
-const NVIDIA: u32 = 0x10DE;
 
 /// The driver's entry points (loaded once).
 struct Api {
     list: NV_ENCODE_API_FUNCTION_LIST,
+    #[cfg(target_os = "linux")]
+    _library: libloading::Library,
 }
 
 // SAFETY: the function table is plain function pointers, immutable after loading; NVENC's API is
@@ -35,7 +28,11 @@ fn api() -> Result<&'static Api, String> {
     API.get_or_init(load).as_ref().map_err(Clone::clone)
 }
 
+#[cfg(target_os = "windows")]
 fn load() -> Result<Api, String> {
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
+    use windows::core::{PCSTR, w};
     // SAFETY: loads the driver's library from the system directory only.
     let module: HMODULE =
         unsafe { LoadLibraryExW(w!("nvEncodeAPI64.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.map_err(|_| "no NVIDIA encoder driver".to_string())?;
@@ -64,39 +61,29 @@ fn load() -> Result<Api, String> {
     }
 }
 
-/// A Direct3D 11 device on the first NVIDIA adapter (what an NVENC session is opened on).
-fn nvidia_device() -> Result<ID3D11Device, String> {
-    // SAFETY: plain COM / D3D calls with valid out-pointers; the adapter outlives the call.
+#[cfg(target_os = "linux")]
+fn load() -> Result<Api, String> {
+    // SAFETY: runtime-load NVIDIA's driver and use the signatures from nvEncodeAPI.h.
+    // The library lives alongside the immutable function table, for the process lifetime.
     unsafe {
-        let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(|e| format!("no DXGI: {e}"))?;
-        let mut i = 0;
-        while let Ok(adapter) = factory.EnumAdapters1(i) {
-            i += 1;
-            let Ok(desc) = adapter.GetDesc1() else { continue };
-            if desc.VendorId != NVIDIA {
-                continue;
-            }
-            let mut device = None;
-            let adapter: IDXGIAdapter = adapter.cast().map_err(|e| e.to_string())?;
-            if D3D11CreateDevice(
-                &adapter,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_FLAG(0),
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                None,
-            )
-            .is_ok()
-                && let Some(d) = device
-            {
-                return Ok(d);
-            }
+        let library = libloading::Library::new("libnvidia-encode.so.1").map_err(|e| format!("no NVIDIA encoder driver: {e}"))?;
+        let version: libloading::Symbol<MaxSupportedVersionFn> = library.get(b"NvEncodeAPIGetMaxSupportedVersion\0").map_err(|e| e.to_string())?;
+        let create: libloading::Symbol<CreateInstanceFn> = library.get(b"NvEncodeAPICreateInstance\0").map_err(|e| e.to_string())?;
+        let mut v = 0;
+        if version(&mut v) != NV_ENC_SUCCESS {
+            return Err("cannot query the NVENC version".into());
         }
+        let ours = (NVENCAPI_VERSION & 0xf) << 4 | ((NVENCAPI_VERSION >> 24) & 0xf);
+        if v < ours {
+            return Err(format!("the NVIDIA driver's NVENC ({}.{}) is older than {}.{}", v >> 4, v & 0xf, ours >> 4, ours & 0xf));
+        }
+        let mut list: NV_ENCODE_API_FUNCTION_LIST = std::mem::zeroed();
+        list.version = NV_ENCODE_API_FUNCTION_LIST_VER;
+        if create(&mut list) != NV_ENC_SUCCESS {
+            return Err("NvEncodeAPICreateInstance failed".into());
+        }
+        Ok(Api { list, _library: library })
     }
-    Err("no NVIDIA adapter".into())
 }
 
 /// What the encoder says it can do for H.264.
@@ -159,15 +146,15 @@ struct Slot {
 pub struct Session {
     api: &'static Api,
     enc: Handle,
-    // keeps the Direct3D device (the session's device) alive
-    _device: ID3D11Device,
+    // Keeps the Direct3D device / retained CUDA context alive through session destruction.
+    _device: Device,
     slots: Vec<Slot>,
     size: (u32, u32),
     out_size: u32,
 }
 
 // SAFETY: an encoder session and its buffers are driver objects used from one thread at a time (the
-// session is `&mut`-driven); the Direct3D device is a free-threaded COM object.
+// session is `&mut`-driven); Direct3D is free-threaded, and NVENC takes an explicit CUDA context.
 unsafe impl Send for Session {}
 
 /// A readable form of a driver status.
@@ -192,14 +179,14 @@ impl Session {
     /// Open a session on the system's NVIDIA GPU, or say why not.
     pub fn open() -> Result<Session, String> {
         let api = api()?;
-        let device = nvidia_device()?;
-        // SAFETY: a zeroed parameter block with its version and the device's COM pointer; the
+        let device = Device::new()?;
+        // SAFETY: a zeroed parameter block with its version and the matching device pointer; the
         // device is kept in the session for as long as the encoder lives. On failure a non-null
         // handle is the driver's and is destroyed exactly once, here, before returning.
         let enc = unsafe {
             let mut p: NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS = std::mem::zeroed();
             p.version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
-            p.deviceType = NV_ENC_DEVICE_TYPE_DIRECTX;
+            p.deviceType = Device::KIND;
             p.device = device.as_raw();
             p.apiVersion = NVENCAPI_VERSION;
             let open = api.list.nvEncOpenEncodeSessionEx.ok_or("the driver has no nvEncOpenEncodeSessionEx")?;

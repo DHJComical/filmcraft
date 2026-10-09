@@ -263,12 +263,12 @@ file ──► codecs (MP4/MOV, MKV, audio)        demux + decode, GOP-aware see
   Decoders run slices on rayon, so an export worker waiting inside a decode can pick up another
   frame of the same source. A request that finds the shared decoder busy decodes with a private
   decoder.
-- **Hardware encoding.** On Windows, `platform::nvenc::export::factory` is registered with
+- **Hardware encoding.** On Windows and 64-bit Linux, `platform::nvenc::export::factory` is registered with
   `filmcraft_export::register_encoder` (`register()` does this once), in front of the software H.264
   encoder. It takes an export only when Export ▸ Hardware encoding (`ExportSettings.hardwareEncoding`,
   `HardwareEncoding::Auto`) is Auto, which is off by default: hardware streams differ from ours, and
   exports are otherwise byte-identical from run to run. NVENC (`platform::nvenc`, the driver's
-  `nvEncodeAPI64.dll` loaded at run time) then takes RGBA frames, converted to 4:2:0 by the software
+  `nvEncodeAPI64.dll` / `libnvidia-encode.so.1` loaded at run time) then takes RGBA frames, converted to 4:2:0 by the software
   encoder's own conversion, and produces the H.264 samples and `avcC` of an MP4 / MOV. It declines
   (the software encoder runs, counted in `export.hardware.declined`) two-pass VBR, HDR, MXF,
   interlaced output, sizes outside NVENC's limits, and systems without an NVIDIA GPU or driver.
