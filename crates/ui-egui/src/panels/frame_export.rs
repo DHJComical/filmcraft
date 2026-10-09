@@ -62,6 +62,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     let mut browse = false;
     let mut replace = false;
     let mut elems = Vec::new();
+    let mut popup_rects = Vec::new();
     let frame = egui::Frame::new().fill(app.tokens.panel_bg).inner_margin(0).corner_radius(6);
     let position_id = egui::Id::new("frame-export-position");
     let position = ctx.data(|m| m.get_temp::<egui::Pos2>(position_id));
@@ -115,7 +116,11 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                         let r = ui.selectable_value(&mut d.format, format, format.label());
                         elems.push((format!("exportFrame.format.{}", format.extension()), r.rect, format.label().into()));
                     }
+                    ui.min_rect()
                 });
+                if let Some(rect) = combo.inner {
+                    popup_rects.push(rect);
+                }
                 elems.push(("exportFrame.format".into(), combo.response.rect, d.format.label().into()));
                 ui.end_row();
                 if !d.format.supports_16() {
@@ -130,7 +135,11 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                         }
                         elems.push((format!("exportFrame.depth.{bits}"), r.rect, format!("{bits} Bit")));
                     }
+                    ui.min_rect()
                 });
+                if let Some(rect) = combo.inner {
+                    popup_rects.push(rect);
+                }
                 elems.push(("exportFrame.depth".into(), combo.response.rect, format!("{} Bit", d.depth)));
                 ui.end_row();
                 ui.label("Path:");
@@ -182,6 +191,13 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
             elems.push(("exportFrame.timecode".into(), r.rect, d.timecode.clone()));
         });
     });
+    if let Some(shown) = &shown {
+        // A press outside the dialog and its own dropdowns cancels the draft. Background
+        // controls still receive the same press, so switching modes or menus works normally.
+        close |= ctx.input(|i| {
+            i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !shown.response.rect.contains(p) && !popup_rects.iter().any(|r| r.contains(p)))
+        });
+    }
     if shown.is_some() && movement != egui::Vec2::ZERO {
         // Keep the unrounded requested pivot between drag frames so subpixel deltas cannot accumulate rounding drift.
         if let Some(pivot) = position.or_else(|| egui::containers::AreaState::load(ctx, window_id).and_then(|state| state.pivot_pos)) {

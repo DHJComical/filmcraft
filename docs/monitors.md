@@ -126,7 +126,9 @@ from the playhead to translate the marked range.
 The camera button in either monitor opens Export Frame. Drag its white header to move the dialog.
 The suggested name is the source filename without its extension, or the sequence name, without an added `.Still` suffix. Choose a name, format and depth,
 use Browse to choose the destination folder (or edit Path), and click OK. Existing files require
-an explicit Replace confirmation. Cancel and the header close button write nothing. The white
+an explicit Replace confirmation. Cancel, the header close button, Escape, and clicking outside
+the dialog (including the top menus or mode tabs) dismiss it without writing anything.
+The dialog's own dropdowns and Browse button keep it open. The white
 header and dark body use original generic controls. Source details and frame time appear below
 the settings. Frame time uses the same hours/minutes/seconds/frames timecode as its monitor,
 including the Program sequence's drop-frame setting, and stays captured while the dialog is open.

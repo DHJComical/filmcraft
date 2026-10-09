@@ -262,3 +262,34 @@ fn exported_frame_timecode_matches_each_monitor_and_stays_captured() {
         }
     }
 }
+
+#[test]
+fn clicking_outside_dismisses_without_export_and_dropdowns_stay_open() {
+    for monitor in ["source", "program"] {
+        let mut h = harness();
+        let count = h.state().session.project.items.len();
+        click(&mut h, &format!("{monitor}.transport.exportFrame"));
+        click(&mut h, "exportFrame.format");
+        assert!(has(&h, "exportFrame.name"));
+        click(&mut h, "exportFrame.format.tiff");
+        click(&mut h, "exportFrame.depth");
+        click(&mut h, "exportFrame.depth.16");
+        assert!(has(&h, "exportFrame.name"));
+        assert_eq!(h.state().auto.elements.iter().find(|e| e.id == "exportFrame.depth").unwrap().label, "16 Bit");
+        click(&mut h, "header.mode.export");
+        assert!(!has(&h, "exportFrame.name"));
+        assert_eq!(h.state().ui.mode, filmcraft_ui_egui::state::Mode::Export);
+        assert_eq!(h.state().session.project.items.len(), count);
+    }
+    let mut h = harness();
+    click(&mut h, "source.transport.exportFrame");
+    let pos = egui::pos2(150.0, 180.0);
+    h.input_mut().events.push(egui::Event::PointerMoved(pos));
+    step(&mut h);
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+        step(&mut h);
+    }
+    step(&mut h);
+    assert!(!has(&h, "exportFrame.name"), "clicking the background monitor must cancel the draft");
+}
