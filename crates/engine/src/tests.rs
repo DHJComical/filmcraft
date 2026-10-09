@@ -237,6 +237,51 @@ fn effects_and_keyframes() {
     assert!(it.effect("motion").unwrap().params["scale"].is_animated());
 }
 
+/// `effects.addKeyframe` is the keyframe diamond of Effect Controls and Properties: it adds a
+/// keyframe at the playhead or removes the one there, and the value then follows the keyframes
+/// that are left (Premiere's Add/Remove Keyframe), unlike the stopwatch, which drops them all.
+#[test]
+fn add_keyframe_toggles_the_keyframe_at_the_playhead() {
+    let mut s = demo();
+    let c = s.active_sequence().unwrap().video_tracks[0].items[0].id.0;
+    let scale = |s: &Session| {
+        let it = s.active_sequence().unwrap().find_item(filmcraft_project::ClipId(c)).unwrap().1;
+        let p = &it.effect("motion").unwrap().params["scale"];
+        (p.keyframes.len(), p.f64_at(it.source_time_at(s.playhead())))
+    };
+    let key = json!({"clip": c, "effect": "motion", "param": "scale"});
+    s.execute("playhead.set", json!({"seconds": 0.5})).unwrap();
+    s.execute("effects.addKeyframe", key.clone()).unwrap();
+    assert_eq!(scale(&s), (1, 100.0), "the first keyframe turns animation on");
+    s.execute("playhead.set", json!({"seconds": 2.5})).unwrap();
+    s.execute("effects.addKeyframe", key.clone()).unwrap();
+    s.execute("effects.setParam", json!({"clip": c, "effect": "motion", "param": "scale", "value": 50.0})).unwrap();
+    assert_eq!(scale(&s), (2, 50.0));
+    // on a keyframe: only that keyframe goes, and Scale is the other keyframe's 100 again
+    s.execute("effects.addKeyframe", key.clone()).unwrap();
+    assert_eq!(scale(&s), (1, 100.0));
+    s.undo();
+    assert_eq!(scale(&s), (2, 50.0));
+    s.redo();
+    assert_eq!(scale(&s), (1, 100.0));
+    // parameters that name nothing are errors and change nothing
+    for bad in [
+        json!({}),
+        json!({"clip": c}),
+        json!({"clip": u64::MAX, "param": "scale"}),
+        json!({"clip": c, "effect": "nope", "param": "scale"}),
+        json!({"clip": c, "effect": u64::MAX, "param": "scale"}),
+        json!({"clip": c, "effect": "motion", "param": "nope"}),
+        json!({"clip": c, "effect": "motion", "param": "scale", "mask": 7}),
+    ] {
+        assert!(s.execute("effects.addKeyframe", bad.clone()).is_err(), "{bad}");
+    }
+    assert_eq!(scale(&s), (1, 100.0));
+    // the stopwatch ends the animation and keeps the value at the playhead
+    s.execute("effects.toggleAnimation", key).unwrap();
+    assert_eq!(scale(&s), (0, 100.0));
+}
+
 #[test]
 fn transitions_and_markers() {
     let mut s = demo();

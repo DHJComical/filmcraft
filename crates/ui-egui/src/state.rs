@@ -384,6 +384,12 @@ pub struct UiState {
     /// Collapsed effect sections in Effect Controls ("clip:index").
     pub collapsed_fx: Vec<String>,
     pub show_menu_bar: bool,
+    /// The header bar (Home, Import, Edit, Export, workspaces). An app that embeds FilmCraft can hide it.
+    #[serde(default = "shown")]
+    pub show_header: bool,
+    /// The status bar (hints, messages, job progress). An app that embeds FilmCraft can hide it.
+    #[serde(default = "shown")]
+    pub show_status_bar: bool,
     pub dark: bool,
     /// Lumetri scopes visible in the Program monitor area.
     pub show_scopes: bool,
@@ -822,6 +828,10 @@ pub struct GfxEdit {
     pub anchor: usize,
 }
 
+fn shown() -> bool {
+    true
+}
+
 fn captions_tab() -> String {
     "Captions".into()
 }
@@ -849,6 +859,8 @@ impl Default for UiState {
             lumetri_grid_folder: None,
             collapsed_fx: vec![],
             show_menu_bar: true,
+            show_header: true,
+            show_status_bar: true,
             dark: true,
             show_scopes: false,
             status: String::new(),

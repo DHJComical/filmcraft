@@ -31,6 +31,13 @@ pub fn stats(app: &FilmcraftApp) -> Value {
     frames["renderCostMs"] = json!(app.frames.render_cost() * 1e3);
     frames["cache"] = json!({"images": images, "imageMB": image_bytes as f64 / 1e6, "plans": plans, "planMB": plan_bytes as f64 / 1e6});
     v["frames"] = frames;
+    // the Program monitor's picture against what is due: how far a drag or a scrub is ahead of it
+    v["monitor"] = json!({
+        "frame": app.program_picture().map(|k| k.frame),
+        "revision": app.program_picture().map(|k| k.revision),
+        "projectRevision": app.session.revision,
+        "playheadFrame": app.session.active_sequence().map(|q| q.settings.frame_rate.frame_at(app.session.playhead())),
+    });
     v["ui"] = json!({"fps": app.fps, "frameMs": if app.fps > 0.0 { 1000.0 / app.fps as f64 } else { 0.0 }});
     v["process"] = json!({"cpuS": crate::frames::process_cpu_time().map(|d| d.as_secs_f64())});
     v
