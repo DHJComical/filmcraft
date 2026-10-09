@@ -50,7 +50,9 @@ pub fn decode_json() -> Value {
 
 /// Export counters: pictures encoded by hardware encoders, sessions, declined requests; and the wall
 /// time of each export stage in milliseconds (`stages`: setup, loudness, render, encode with its
-/// `convert` part, audio, mux, finish), summed over the exports of this process (diff two readings).
+/// `convert` part, audio, mux, finish, wait), summed over the exports of this process (diff two readings).
+/// Render and encode overlap (the next batch renders while this one is encoded), so their sum can exceed
+/// the export's wall time; `waitMs` is the encoding side's idle wait for the render.
 pub fn export_json() -> Value {
     let hw = filmcraft_export::hw_encode_stats();
     let stages: serde_json::Map<String, Value> =
@@ -109,7 +111,7 @@ mod tests {
         for k in ["frames", "sessions", "declined"] {
             assert!(v["export"]["hardware"][k].is_number(), "export.hardware.{k} in {v}");
         }
-        for k in ["setupMs", "loudnessMs", "renderMs", "encodeMs", "convertMs", "audioMs", "muxMs", "finishMs"] {
+        for k in ["setupMs", "loudnessMs", "renderMs", "encodeMs", "convertMs", "audioMs", "muxMs", "finishMs", "waitMs"] {
             assert!(v["export"]["stages"][k].is_number(), "export.stages.{k} in {v}");
         }
         assert!(v["media"]["openSources"].is_number());

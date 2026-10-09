@@ -658,7 +658,10 @@ pub fn note_hw_encode_declined() {
     HW_DECLINED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The stages of an export whose wall time [`stage_times`] adds up (`perf.stats` `export.stages`).
+/// The stages of an export whose wall time [`stage_times`] adds up (`perf.stats` `export.stages`). The
+/// render of one batch overlaps the encoding of the previous one (`Exporter::overlapping`), so
+/// [`Stage::Render`] and [`Stage::Encode`] with its neighbours can sum to more than the export took;
+/// [`Stage::Wait`] is the time left waiting for the render.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     /// [`Exporter::new`]: settings, pipeline, encoder and audio set-up.
@@ -677,12 +680,16 @@ pub enum Stage {
     Mux,
     /// Flushing the encoders and finishing the file.
     Finish,
+    /// Time the encoding side waited, after encoding a batch, for the next batch to finish rendering
+    /// (only with overlap: large means the export is render-bound, near zero encode-bound).
+    Wait,
 }
 
-const STAGES: usize = 8;
+const STAGES: usize = 9;
 
 impl Stage {
-    pub const ALL: [Stage; STAGES] = [Stage::Setup, Stage::Loudness, Stage::Render, Stage::Encode, Stage::Convert, Stage::Audio, Stage::Mux, Stage::Finish];
+    pub const ALL: [Stage; STAGES] =
+        [Stage::Setup, Stage::Loudness, Stage::Render, Stage::Encode, Stage::Convert, Stage::Audio, Stage::Mux, Stage::Finish, Stage::Wait];
 
     /// The name in `perf.stats`.
     pub fn name(self) -> &'static str {
@@ -695,6 +702,7 @@ impl Stage {
             Stage::Audio => "audio",
             Stage::Mux => "mux",
             Stage::Finish => "finish",
+            Stage::Wait => "wait",
         }
     }
 }
