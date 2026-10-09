@@ -2092,11 +2092,19 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
         && let Some(p) = ctx.pointer_hover_pos()
         && layout.content.contains(p)
     {
-        let row = layout.row_at(p.y).cloned();
+        let source = crate::panels::dragged_source(ui);
+        let row = layout.row_at(p.y).cloned().filter(|r| {
+            source.is_none_or(|s| match r.kind {
+                TrackKind::Video => s.video,
+                TrackKind::Audio => s.audio,
+            })
+        });
         let t = snap(app, seq, layout, rate.snap_nearest(layout.tick_at(p.x).max(Tick::ZERO)), &[]);
         let still = app.session.prefs.timeline.still_duration(rate);
         let is_still = app.session.project.item(item).and_then(|i| i.as_media()).is_some_and(|m| m.info.kind == filmcraft_media::MediaKind::Still);
-        let dur = app.session.project.item(item).map(|i| i.duration()).filter(|d| d.0 > 0 && !is_still).unwrap_or(still);
+        let dur = source
+            .map(|s| s.range.duration)
+            .unwrap_or_else(|| app.session.project.item(item).map(|i| i.duration()).filter(|d| d.0 > 0 && !is_still).unwrap_or(still));
         if let Some(row) = &row {
             let r = Rect::from_min_max(pos2(layout.x_of(t), row.rect.min.y + 1.0), pos2(layout.x_of(t + dur), row.rect.max.y - 1.0));
             ui.painter().rect_filled(r, 3.0, Color32::from_white_alpha(40));
@@ -2112,7 +2120,14 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
                 TrackKind::Video => (Some(row.track.0), seq.audio_tracks.get(row.index).or(seq.audio_tracks.first()).map(|t| t.id.0)),
                 TrackKind::Audio => (seq.video_tracks.get(row.index).or(seq.video_tracks.first()).map(|t| t.id.0), Some(row.track.0)),
             };
-            let r = app.session.execute("timeline.place", json!({"item": item.0, "track": vt, "audioTrack": at, "time": t.0, "insert": mods.command}));
+            let mut params = json!({"item": item.0, "track": vt, "audioTrack": at, "time": t.0, "insert": mods.command});
+            if let Some(source) = source {
+                params["sourceIn"] = json!(source.range.start.0);
+                params["duration"] = json!(source.range.duration.0);
+                params["video"] = json!(source.video);
+                params["audio"] = json!(source.audio);
+            }
+            let r = app.session.execute("timeline.place", params);
             if let Err(e) = r {
                 app.ui.status = e.to_string();
             }
