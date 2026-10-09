@@ -15,33 +15,12 @@ use std::sync::Arc;
 
 use filmcraft_bitstream::{length_prefixed_nals, unescape_rbsp};
 use filmcraft_codecs::{CodecError, DecodedFrame, Result};
-use filmcraft_frame::VideoFrame;
 use filmcraft_h264::dpb::{Dpb, DpbEntry, Output, OutputMeta, RefMark};
 use filmcraft_h264::params::{Pps, Sps};
 use filmcraft_h264::slice::{NalHeader, Poc, PocState, SliceHeader, SliceType, is_new_picture, nal_type};
 
+use super::Accel;
 use super::ffi::{self, VAIQMatrixBufferH264, VAPictureH264, VAPictureParameterBufferH264, VASliceParameterBufferH264, pic_bits, seq_bits};
-
-/// The hardware a [`Front`] drives: a fixed set of surfaces, picture decoding into one of them and
-/// reading one back.
-pub trait Accel: Send {
-    /// The VA surface ids of the decoder's surfaces; [`Front`] refers to them by index.
-    fn surfaces(&self) -> &[ffi::VASurfaceID];
-    /// Decode one picture (its slices: parameters and the NAL unit, header byte and emulation
-    /// prevention included) into surface `target` (an index into [`Accel::surfaces`]).
-    fn decode(
-        &mut self,
-        target: usize,
-        pic: &VAPictureParameterBufferH264,
-        iq: &VAIQMatrixBufferH264,
-        slices: &[(VASliceParameterBufferH264, Vec<u8>)],
-    ) -> std::result::Result<(), String>;
-    /// The picture in surface `index`, once decoded.
-    fn read(&mut self, index: usize) -> std::result::Result<VideoFrame, String>;
-    /// Make surface `index` a copy of surface `from`, or mid-gray (every sample 128) when `None`:
-    /// the "non-existing" frames of a frame_num gap, as the software decoder makes them.
-    fn fill(&mut self, index: usize, from: Option<usize>) -> std::result::Result<(), String>;
-}
 
 /// A picture in the DPB: its surface, field order counts (after an MMCO 5, relative to itself) and
 /// place in decoding order.
@@ -340,7 +319,7 @@ impl<A: Accel> Front<A> {
             *slot = va_ref(e, surfaces);
         }
         let iq = iq_matrix(&p.pps);
-        self.accel.decode(p.target, &pic, &iq, &p.slices).map_err(decode_err)?;
+        self.accel.decode_h264(p.target, &pic, &iq, &p.slices).map_err(decode_err)?;
 
         self.poc_state.update(&p.first, &p.poc);
         let mmco5 = p.first.has_mmco5();

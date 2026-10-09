@@ -104,7 +104,7 @@ a machine without the encoder) is an error naming the reason instead of a differ
 
 ## Addendum (2026-10-08): VA-API hardware decoding on Linux
 
-The Linux backend this decision named: H.264 decoding through VA-API (`vaapi/`). The rules above
+The Linux backend this decision named: H.264 and HEVC decoding through VA-API (`vaapi/`). The rules above
 hold; VA-API differs from the other two backends in three ways.
 
 - **libva is loaded at run time** (`libva.so.2`, `libva-drm.so.2`, through `libloading`: ISC, already
@@ -115,11 +115,12 @@ hold; VA-API differs from the other two backends in three ways.
   C compiler's view of it, as for NVENC. Only `vaapi::va` carries `#[allow(unsafe_code)]`; the
   declarations, the H.264 front end (`vaapi::h264`) and the decoder (`VaDecoder`) are safe code.
 - **Decoding is stateless:** the host parses the stream and keeps the decoded picture buffer; the GPU
-  only decodes slice data. FilmCraft does that host side with the software decoder's own parsers and
-  DPB (`filmcraft_h264::dpb` is generic over what a picture is), so the two decoders decide alike by
+  only decodes slice data. FilmCraft does that host side with the software decoders' own parsers and
+  DPBs (`filmcraft_h264::dpb` and `filmcraft_hevc::dpb` are generic over what a picture is), so the two decoders decide alike by
   construction, and the front end is tested on every OS against a stand-in for the hardware. The
   one place they cannot agree is concealment: pictures predicted from frames that were never decoded
-  (the leading pictures of an open GOP after a seek) are concealed by both but can differ.
+  (the leading pictures of an open H.264 GOP after a seek) are concealed by both but can differ;
+  HEVC pictures with references that were never decoded go to the software decoder instead.
 - **One callback into Rust:** libva's error messages go to our log through a callback that runs under
   `catch_unwind`; its info messages are turned off.
 

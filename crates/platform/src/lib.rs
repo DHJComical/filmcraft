@@ -182,17 +182,15 @@ pub fn media_foundation_factory(entry: &filmcraft_isobmff::SampleEntry) -> Optio
     }
 }
 
-/// The VA-API factory: a [`HybridDecoder`] around [`vaapi::VaDecoder`] for H.264 streams this
-/// system's VA-API driver decodes, `None` otherwise (other codecs keep the software decoders).
+/// The VA-API factory: a [`HybridDecoder`] around [`vaapi::VaDecoder`] for H.264 and HEVC
+/// streams this system's VA-API driver decodes, `None` otherwise (other codecs keep the software
+/// decoders).
 #[cfg(target_os = "linux")]
 pub fn vaapi_factory(entry: &filmcraft_isobmff::SampleEntry) -> Option<filmcraft_codecs::Result<Box<dyn filmcraft_codecs::VideoDecoder>>> {
     if !filmcraft_codecs::hw::hardware_decoding() {
         return None;
     }
     let info = filmcraft_codecs::hw::NalStreamInfo::from_entry(entry)?.ok()?;
-    if info.codec != filmcraft_codecs::hw::NalCodec::H264 {
-        return None;
-    }
     match vaapi::VaDecoder::new(info.clone()) {
         Ok(va) => Some(Ok(Box::new(HybridDecoder::new(Box::new(va), entry.clone(), info)))),
         Err(why) => {

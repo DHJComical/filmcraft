@@ -15,8 +15,8 @@ use std::sync::OnceLock;
 use filmcraft_frame::VideoFrame;
 use libloading::Library;
 
+use super::Accel;
 use super::ffi::{self, VAConfigAttrib, VAImage, VAImageFormat, VASurfaceID};
-use super::h264::Accel;
 use crate::biplanar::{self, Biplanar, Geometry};
 
 /// The libva entry points (the libraries stay loaded for the life of the process).
@@ -216,10 +216,22 @@ pub struct Session {
     geometry: Geometry,
 }
 
+/// The surface and image formats of 8-bit (NV12) or 10-bit (P010) 4:2:0 pictures:
+/// (render-target format, image fourcc, bits per pixel of the image).
+fn formats(bits: u32) -> Result<(c_uint, u32, u32), String> {
+    match bits {
+        8 => Ok((ffi::VA_RT_FORMAT_YUV420, ffi::VA_FOURCC_NV12, 12)),
+        10 => Ok((ffi::VA_RT_FORMAT_YUV420_10, ffi::VA_FOURCC_P010, 24)),
+        _ => Err(format!("{bits}-bit pictures are not decoded through VA-API")),
+    }
+}
+
 impl Session {
-    /// A decoder for the first of `profiles` the driver decodes (VLD, 8-bit 4:2:0), with `count`
-    /// surfaces of `size` (coded luma samples); pictures read back are cut to `geometry`.
+    /// A decoder for the first of `profiles` the driver decodes (VLD, 4:2:0 of `geometry.bits`:
+    /// 8 or 10), with `count` surfaces of `size` (coded luma samples); pictures read back are cut
+    /// to `geometry`.
     pub fn new(profiles: &[ffi::VAProfile], size: (u32, u32), count: usize, geometry: Geometry) -> Result<Self, String> {
+        let (rt_format, _, _) = formats(geometry.bits)?;
         let display = Display::open()?;
         let api = display.api;
         let dpy = display.dpy;
@@ -233,11 +245,11 @@ impl Session {
                 why = e;
                 continue;
             }
-            if attr.value & ffi::VA_RT_FORMAT_YUV420 == 0 {
-                why = format!("profile {profile} does not decode to 8-bit 4:2:0");
+            if attr.value & rt_format == 0 {
+                why = format!("profile {profile} does not decode to {}-bit 4:2:0", geometry.bits);
                 continue;
             }
-            attr.value = ffi::VA_RT_FORMAT_YUV420;
+            attr.value = rt_format;
             let mut id = ffi::VA_INVALID_ID;
             // SAFETY: as above; `id` is a live output.
             let st = unsafe { (api.create_config)(dpy, profile, ffi::VAEntrypointVLD, &mut attr, 1, &mut id) };
@@ -255,7 +267,7 @@ impl Session {
         let count_c = c_uint::try_from(count).map_err(|_| "too many surfaces")?;
         let mut surfaces = vec![ffi::VA_INVALID_SURFACE; count];
         // SAFETY: `surfaces` has room for `count` ids; no attributes are passed (null, 0).
-        let st = unsafe { (api.create_surfaces)(dpy, ffi::VA_RT_FORMAT_YUV420, size.0, size.1, surfaces.as_mut_ptr(), count_c, std::ptr::null_mut(), 0) };
+        let st = unsafe { (api.create_surfaces)(dpy, rt_format, size.0, size.1, surfaces.as_mut_ptr(), count_c, std::ptr::null_mut(), 0) };
         s.display.check(st, "vaCreateSurfaces")?;
         s.surfaces = surfaces;
         let (w, h) = (c_int::try_from(size.0).map_err(|_| "picture too wide")?, c_int::try_from(size.1).map_err(|_| "picture too tall")?);
@@ -294,16 +306,21 @@ impl Session {
         self.display.check(st, "vaRenderPicture")
     }
 
-    fn decode_into(
+    /// Decode one picture into `surface`: the picture parameters `pic`, the scaling matrices `iq`
+    /// when given, and a parameter + data buffer per slice; the buffers made go into `buffers`.
+    fn decode_into<P, Q, S>(
         &self,
         surface: VASurfaceID,
         buffers: &mut Vec<ffi::VABufferID>,
-        pic: &ffi::VAPictureParameterBufferH264,
-        iq: &ffi::VAIQMatrixBufferH264,
-        slices: &[(ffi::VASliceParameterBufferH264, Vec<u8>)],
+        pic: &P,
+        iq: Option<&Q>,
+        slices: &[(S, Vec<u8>)],
     ) -> Result<(), String> {
         buffers.push(self.value_buffer(ffi::VAPictureParameterBufferType, pic)?);
-        buffers.push(self.value_buffer(ffi::VAIQMatrixBufferType, iq)?);
+        if let Some(iq) = iq {
+            buffers.push(self.value_buffer(ffi::VAIQMatrixBufferType, iq)?);
+        }
+        let head = buffers.len();
         for (params, data) in slices {
             buffers.push(self.value_buffer(ffi::VASliceParameterBufferType, params)?);
             buffers.push(self.buffer(ffi::VASliceDataBufferType, data.as_ptr().cast(), data.len())?);
@@ -312,8 +329,9 @@ impl Session {
         // SAFETY: `surface` is one of this context's render targets.
         let st = unsafe { (api.begin_picture)(self.display.dpy, self.context, surface) };
         self.display.check(st, "vaBeginPicture")?;
-        let mut rendered = self.render(&mut buffers[..2]);
-        for pair in buffers[2..].chunks_mut(2) {
+        let (picture, slice_buffers) = buffers.split_at_mut(head);
+        let mut rendered = self.render(picture);
+        for pair in slice_buffers.chunks_mut(2) {
             if rendered.is_err() {
                 break;
             }
@@ -330,7 +348,8 @@ impl Session {
         if let Some(image) = self.image {
             return Ok(image);
         }
-        let mut format = VAImageFormat { fourcc: ffi::VA_FOURCC_NV12, byte_order: 1, bits_per_pixel: 12, ..Default::default() };
+        let (_, fourcc, bits_per_pixel) = formats(self.geometry.bits)?;
+        let mut format = VAImageFormat { fourcc, byte_order: 1, bits_per_pixel, ..Default::default() };
         let mut image = VAImage { image_id: ffi::VA_INVALID_ID, buf: ffi::VA_INVALID_ID, ..Default::default() };
         let (w, h) = (c_int::try_from(self.size.0).map_err(|_| "picture too wide")?, c_int::try_from(self.size.1).map_err(|_| "picture too tall")?);
         // SAFETY: `format` and `image` are live; the driver fills `image` in.
@@ -354,7 +373,8 @@ impl Session {
         Ok(image)
     }
 
-    /// Every sample of `image` set to 128 (mid-gray in NV12).
+    /// Every sample of `image` set to mid-gray: 128 in NV12, 512 (0x8000 in the high bits of
+    /// little-endian 16-bit words) in P010.
     fn write_gray(&self, image: &VAImage) -> Result<(), String> {
         let api = self.display.api;
         let mut ptr: *mut c_void = std::ptr::null_mut();
@@ -363,13 +383,32 @@ impl Session {
         self.display.check(st, "vaMapBuffer")?;
         if !ptr.is_null() {
             // SAFETY: a mapped image buffer holds `data_size` writable bytes at `ptr` until it is
-            // unmapped below.
-            unsafe { std::ptr::write_bytes(ptr.cast::<u8>(), 128, image.data_size as usize) };
+            // unmapped below; the slice does not outlive this block.
+            let data = unsafe { std::slice::from_raw_parts_mut(ptr.cast::<u8>(), image.data_size as usize) };
+            if self.geometry.bits > 8 {
+                for w in data.as_chunks_mut::<2>().0 {
+                    w.copy_from_slice(&0x8000u16.to_le_bytes());
+                }
+            } else {
+                data.fill(128);
+            }
         }
         // SAFETY: the buffer was mapped above.
         let st = unsafe { (api.unmap_buffer)(self.display.dpy, image.buf) };
         self.display.check(st, "vaUnmapBuffer")?;
         if ptr.is_null() { Err("vaMapBuffer returned no data".into()) } else { Ok(()) }
+    }
+
+    fn decode_picture<P, Q, S>(&mut self, target: usize, pic: &P, iq: Option<&Q>, slices: &[(S, Vec<u8>)]) -> Result<(), String> {
+        let surface = *self.surfaces.get(target).ok_or("surface out of range")?;
+        let mut buffers = Vec::with_capacity(2 + 2 * slices.len());
+        let decoded = self.decode_into(surface, &mut buffers, pic, iq, slices);
+        for id in buffers {
+            // SAFETY: each id is a buffer made above on this display, destroyed once; vaEndPicture
+            // has returned, so the driver no longer reads it.
+            unsafe { (self.display.api.destroy_buffer)(self.display.dpy, id) };
+        }
+        decoded
     }
 
     fn read_image(&self, image: &VAImage) -> Result<VideoFrame, String> {
@@ -394,10 +433,10 @@ impl Session {
     }
 }
 
-/// The two planes of a mapped NV12 image.
+/// The two planes of a mapped NV12 / P010 image.
 fn biplanar_view<'a>(image: &VAImage, data: &'a [u8]) -> Result<Biplanar<'a>, String> {
-    if image.format.fourcc != ffi::VA_FOURCC_NV12 || image.num_planes < 2 {
-        return Err(format!("the read-back image is not NV12 (fourcc {:#x}, {} planes)", image.format.fourcc, image.num_planes));
+    if !matches!(image.format.fourcc, ffi::VA_FOURCC_NV12 | ffi::VA_FOURCC_P010) || image.num_planes < 2 {
+        return Err(format!("the read-back image is not NV12 / P010 (fourcc {:#x}, {} planes)", image.format.fourcc, image.num_planes));
     }
     let [p0, p1, _] = image.pitches;
     if p0 != p1 {
@@ -413,22 +452,24 @@ impl Accel for Session {
         &self.surfaces
     }
 
-    fn decode(
+    fn decode_h264(
         &mut self,
         target: usize,
         pic: &ffi::VAPictureParameterBufferH264,
         iq: &ffi::VAIQMatrixBufferH264,
         slices: &[(ffi::VASliceParameterBufferH264, Vec<u8>)],
     ) -> Result<(), String> {
-        let surface = *self.surfaces.get(target).ok_or("surface out of range")?;
-        let mut buffers = Vec::with_capacity(2 + 2 * slices.len());
-        let decoded = self.decode_into(surface, &mut buffers, pic, iq, slices);
-        for id in buffers {
-            // SAFETY: each id is a buffer made above on this display, destroyed once; vaEndPicture
-            // has returned, so the driver no longer reads it.
-            unsafe { (self.display.api.destroy_buffer)(self.display.dpy, id) };
-        }
-        decoded
+        self.decode_picture(target, pic, Some(iq), slices)
+    }
+
+    fn decode_hevc(
+        &mut self,
+        target: usize,
+        pic: &ffi::VAPictureParameterBufferHEVC,
+        iq: Option<&ffi::VAIQMatrixBufferHEVC>,
+        slices: &[(ffi::VASliceParameterBufferHEVC, Vec<u8>)],
+    ) -> Result<(), String> {
+        self.decode_picture(target, pic, iq, slices)
     }
 
     fn read(&mut self, index: usize) -> Result<VideoFrame, String> {
