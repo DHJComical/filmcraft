@@ -273,8 +273,12 @@ file ──► codecs (MP4/MOV, MKV, audio)        demux + decode, GOP-aware see
   (the software encoder runs, counted in `export.hardware.declined`) two-pass VBR, HDR, MXF,
   interlaced output, sizes outside NVENC's limits, and systems without an NVIDIA GPU or driver.
   A failure during an export ends it with an error: the software encoder cannot take over a hardware
-  stream. The same NVENC session also encodes H.265 (HEVC Main, 8-bit 4:2:0, SDR; the `hvcC` is built
-  from the SPS the encoder wrote): `register()` hands `platform::nvenc::hevc_available` to
+  stream. The same NVENC session also encodes H.265 (HEVC Main 8-bit 4:2:0 SDR, or Main 10 HDR: PQ / HLG,
+  BT.2020, limited range, from the float R'G'B' pictures through `rgbf_to_yuv420_10` into P010 input
+  buffers, with the HDR10 static metadata as SEI on every IDR for PQ; the `hvcC` is built from the SPS
+  the encoder wrote). An HDR sequence exports as HDR H.265 only where a registered probe says so
+  (`filmcraft_export::register_hdr_probe`, `hdr_available`; NVENC with 10-bit support), otherwise it is
+  tone-mapped to SDR as on macOS: `register()` hands `platform::nvenc::hevc_available` to
   `filmcraft_export::register_format_probe`, so the H.265 format exists where an HEVC encoder does,
   and choosing it is the opt-in (the Hardware encoding toggle governs H.264 only). With no software
   H.265 encoder, what NVENC declines is counted and ends the export with an error that says why.

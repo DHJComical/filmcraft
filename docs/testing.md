@@ -72,14 +72,15 @@ are never linked or shipped ([AGENTS.md](../AGENTS.md) §2).
   AV1 fixtures (libvpx-vp9, libaom-av1; 360p, 1080p, 2160p, hidden alt-ref frames, two GOPs) need an ffmpeg with those encoders.
 
 The NVENC tests (`crates/platform/tests/nvenc.rs` and `nvenc_export.rs` for H.264, `nvenc_hevc.rs`,
-`nvenc_hevc_export.rs`, `nvenc_hevc_probe.rs` and `nvenc_hevc_warm.rs` for H.265; Windows only) skip,
-printing `SKIPPED`, without an NVIDIA GPU with NVENC (H.265: when the HEVC probe says there is no HEVC
-encoder; on a machine that has one, a configuration NVENC refuses fails the test). The FFI layout tests in
+`nvenc_hevc_export.rs`, `nvenc_hevc_probe.rs` and `nvenc_hevc_warm.rs` for H.265, `nvenc_hevc_main10.rs` and
+`nvenc_hevc_hdr_export.rs` for Main 10 HDR; Windows only) skip, printing `SKIPPED`, without an NVIDIA GPU
+with NVENC (H.265: when the HEVC probe says there is no HEVC encoder; Main 10: when the Main 10 probe says
+there is no 10-bit encoder; on a machine that has one, a configuration NVENC refuses fails the test). The FFI layout tests in
 `crates/platform/src/nvenc/abi_tests.rs` were generated from a C program built with MSVC
 (`cl` after `vcvars64.bat`) against NVIDIA's MIT-licensed `nvEncodeAPI.h` (12.1); the header and the
 program are not in the repository. To regenerate them, put the header in a scratch directory and
 write a program that prints, for every type, field, constant and GUID of `src/nvenc/ffi.rs` that the
-asserts name (H.264 and HEVC), `sizeof` / `alignof` / `offsetof`, the enum and macro values cast to
+asserts name (H.264, HEVC and the HEVC picture parameters with their SEI payload array), `sizeof` / `alignof` / `offsetof`, the enum and macro values cast to
 64-bit integers and the GUIDs as 128-bit hex; for the bit-fields of the `flags` words, which
 `offsetof` cannot take, zero a structure, set that one field to its maximum and print the 32-bit word.
 Compare the numbers with the asserts (a difference is drift, which must be understood before

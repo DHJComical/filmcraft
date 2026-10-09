@@ -389,6 +389,8 @@ fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         .map(|q| (q.settings.width, q.settings.height, q.settings.frame_rate, q.settings.sample_rate))
         .unwrap_or((1920, 1080, FrameRate::FPS_24, 48_000));
     let has_captions = app.session.active_sequence().is_some_and(|q| !q.caption_tracks.is_empty());
+    // an HDR sequence exports HDR (H.265 Main 10 where the hardware encoder has it) unless SDR is asked for
+    let seq_hdr = app.session.active_sequence().is_some_and(|q| q.settings.color.working.is_hdr());
     let all_presets = app.session.export_presets.all();
     let favs: Vec<String> = all_presets.iter().filter(|p| app.session.export_presets.is_favorite(&p.name)).map(|p| p.name.clone()).collect();
     let mut pick_folder = false;
@@ -463,7 +465,7 @@ fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         ui.add_space(8.0);
         let s = &mut ex.settings;
         if s.has_video() && section(ui, &mut reg, &mut ex.open_sections, "video", "Video", &t) {
-            video_section(ui, &mut reg, s, &t, seq_w, seq_h);
+            video_section(ui, &mut reg, s, &t, seq_w, seq_h, seq_hdr);
         }
         if (s.has_audio()
             || !s.has_video()
@@ -545,7 +547,7 @@ fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     reg.flush(app);
 }
 
-fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &Tokens, seq_w: u32, seq_h: u32) {
+fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &Tokens, seq_w: u32, seq_h: u32, seq_hdr: bool) {
     // frame size
     let mut match_size = s.frame_size.is_none();
     row(ui, t, "Frame Size", |ui| {
@@ -602,8 +604,13 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
         f @ (Format::H264 | Format::Hevc) => {
             let hevc = f == Format::Hevc;
             if hevc {
-                // the hardware encoder writes one profile: Main, 8-bit 4:2:0, level chosen by the encoder
-                row(ui, t, "Profile", |ui| ui.label("Main (8-bit)"));
+                // the hardware encoder writes Main (8-bit 4:2:0), or Main 10 for HDR sequences where it can; level chosen by the encoder
+                let label = match (filmcraft_engine::export::hdr_available(Format::Hevc), seq_hdr && !s.sdr) {
+                    (true, true) => "Main 10 (10-bit, HDR)",
+                    (true, false) => "Main (8-bit; Main 10 for HDR sequences)",
+                    (false, _) => "Main (8-bit)",
+                };
+                row(ui, t, "Profile", |ui| ui.label(label));
                 row(ui, t, "Encoder", |ui| ui.label("Hardware (H.265 has no software encoder)"));
             } else {
                 row(ui, t, "Profile", |ui| {

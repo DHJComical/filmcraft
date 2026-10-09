@@ -95,6 +95,14 @@ Everything else in this record applies unchanged: `unsafe` stays in `crates/plat
 has a `// SAFETY:` comment, no panic crosses the FFI boundary, the public API is safe, and the crate
 compiles everywhere (`register()` is a no-op off macOS).
 
+## Addendum (2026-10-08): NVENC HEVC Main 10 (HDR)
+
+HDR H.265 added no `unsafe` module either. `nvenc::ffi` gained data declarations (the HEVC picture
+parameters, `NV_ENC_SEI_PAYLOAD`, the 10-bit buffer format) checked by the generated layout tests, and
+`nvenc::session` gained the P010 pitch check and the SEI pointers it hands to the driver, which are
+heap blocks owned by the session for its whole life (`// SAFETY:` comments say so). The conversion from
+float pictures to 10-bit planes is safe code in the export crate.
+
 ## Addendum (2026-10-07): hardware H.265 (HEVC) encoding
 
 The same VideoToolbox session wrapper also creates HEVC sessions (`VtProfile::HevcMain`). The rules
