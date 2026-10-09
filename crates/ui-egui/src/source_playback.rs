@@ -108,7 +108,7 @@ impl FilmcraftApp {
         let Some(item) = self.source_playback.item else { return };
         let Some(view) = source_view(&self.session, item) else { return };
         let Some(media) = self.session.project.item(view.media).and_then(|i| i.as_media()) else { return };
-        if media.info.audio.is_none() {
+        if !media.info.has_audio() {
             return;
         }
         let project = self.session.project.clone();
