@@ -449,6 +449,16 @@ pub struct SourceView {
 }
 
 impl SourceView {
+    /// The marked Source span. Unset marks mean the beginning/end of the source; Out is inclusive.
+    pub fn selected_range(&self) -> TimeRange {
+        if self.start.0 < 0 || self.end <= self.start {
+            return TimeRange::new(self.start, Tick::ZERO);
+        }
+        let start = self.mark_in.unwrap_or(self.start).clamp(self.start, self.end);
+        let end = self.mark_out.map(|o| Tick(o.0.saturating_add(self.rate.frame_duration().0))).unwrap_or(self.end).clamp(start, self.end);
+        TimeRange::from_bounds(start, end)
+    }
+
     pub fn to_json(&self, playhead: Tick) -> Value {
         json!({
             "item": self.item.0, "media": self.media.0, "start": self.start.0, "end": self.end.0, "fps": self.rate.as_f64(),

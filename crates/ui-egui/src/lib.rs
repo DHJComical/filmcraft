@@ -45,6 +45,7 @@ pub mod panels;
 pub mod perf;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod play_ahead;
+pub mod source_playback;
 pub mod state;
 pub mod theme;
 pub mod widgets;
@@ -115,6 +116,8 @@ pub struct HostHooks {
     pub pick_open_file: Option<Box<dyn FnMut(&str, &[&str]) -> Option<String>>>,
     /// Folder picker (Link Media search, proxy and Project Manager destinations).
     pub pick_folder: Option<Box<dyn FnMut() -> Option<String>>>,
+    /// Folder picker starting at the current destination (Export Frame).
+    pub pick_folder_at: Option<Box<dyn FnMut(&str) -> Option<String>>>,
     /// Pick one file for a command that relinks to it (Link Media ▸ Locate…, Attach Proxies,
     /// Reconnect Full Resolution) instead of importing it, as [`Self::pick_files`] does. Native
     /// hosts return the path. A host whose picker is asynchronous (the web) returns `None` and
@@ -217,6 +220,7 @@ pub struct FilmcraftApp {
     pub tokens: Tokens,
     pub frames: Arc<FrameServer>,
     pub playback: Playback,
+    pub source_playback: source_playback::SourcePlayback,
     pub audio: Option<Box<dyn AudioOut>>,
     pub hooks: HostHooks,
     pub dialog: Option<Dialog>,
@@ -419,6 +423,7 @@ impl FilmcraftApp {
             tokens: Tokens::for_kind(ThemeKind::Dark),
             frames,
             playback: Playback { speed: 1.0, ..Default::default() },
+            source_playback: Default::default(),
             audio: None,
             hooks: HostHooks::default(),
             // Unsaved changes left by a session that died are offered first thing.
@@ -728,6 +733,7 @@ impl FilmcraftApp {
     }
 
     pub fn play(&mut self, speed: f64) {
+        self.stop_source();
         if self.session.active_sequence().is_none() {
             return;
         }
@@ -1175,7 +1181,9 @@ impl FilmcraftApp {
             }
             // Mark In/Out in the Source monitor when it has focus.
             let params = if self.ui.focused == PanelKind::Source
-                && (matches!(id.as_str(), "markers.markIn" | "markers.markOut") || id.starts_with("markers.markSplit") || id.starts_with("markers.goToSplit"))
+                && (matches!(id.as_str(), "markers.markIn" | "markers.markOut" | "markers.clearInOut")
+                    || id.starts_with("markers.markSplit")
+                    || id.starts_with("markers.goToSplit"))
             {
                 json!({"target": "source"})
             } else {
@@ -1341,6 +1349,7 @@ impl FilmcraftApp {
         }
         self.handle_shortcuts(&ctx);
         self.advance_playback(&ctx);
+        self.advance_source_playback(&ctx);
         let t = self.tokens;
         let full = ui.max_rect();
         ui.painter().rect_filled(full, 0.0, t.app_bg);

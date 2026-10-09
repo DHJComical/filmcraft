@@ -68,10 +68,33 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
                 Some(ItemKind::Sequence(s)) => (s.settings.width, s.settings.height),
                 _ => (1920, 1080),
             };
+            let mut view = view;
+            if let Some(range) = crate::panels::source_range::preview(app, &ctx) {
+                view.mark_in = Some(range.start);
+                view.mark_out = Some(Tick(range.end().0.saturating_sub(view.rate.frame_duration().0)).max(view.start));
+            }
             origin = view.start;
             (Target::Item(item), size, view.rate, app.session.state.source_playhead, view.end, false, view.mark_in, view.mark_out, pi.name.clone())
         }
     };
+    // Display implicit full-clip marks without writing them into the project on open.
+    let draft = crate::panels::source_range::preview_for(app, &ctx, which);
+    let (mark_in, mark_out) = if which == Which::Source {
+        (
+            Some(draft.map(|r| r.start).unwrap_or(mark_in.unwrap_or(origin))),
+            Some(
+                draft
+                    .map(|r| Tick(r.end().0.saturating_sub(rate.frame_duration().0)))
+                    .unwrap_or_else(|| mark_out.unwrap_or_else(|| (duration - rate.frame_duration()).max(origin))),
+            ),
+        )
+    } else {
+        (
+            mark_in.map(|m| draft.map(|r| r.start).unwrap_or(m)),
+            mark_out.map(|m| draft.map(|r| Tick(r.end().0.saturating_sub(rate.frame_duration().0))).unwrap_or(m)),
+        )
+    };
+    let range_start = mark_in.unwrap_or(origin);
     let prefix = if which == Which::Program { "program" } else { "source" };
     let mv = monitor_view::view(app, which).clone();
     let display = mv.display_mode().unwrap_or(DisplayMode::Composite);
@@ -147,7 +170,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     ui.set_clip_rect(saved_clip.intersect(if mv.zoom.is_some() && !compare { video_area } else { picture_area.expand(12.0) }));
     if show_picture {
         ui.painter().rect_filled(pic, 0.0, t.monitor_bg);
-        let playing = which == Which::Program && app.playback.playing;
+        let playing = if which == Which::Program { app.playback.playing } else { app.source_playback.clock.playing };
         let res = mv.effective_res(playing);
         let screen_scale = (pic.width() * ppp / frame_size.0 as f32).min(1.0);
         let scale = quantize_scale(res.scale().min(screen_scale.max(1.0 / 32.0)));
@@ -169,8 +192,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
         let key = FrameKey { target, frame, size: size_key, revision: rev, draft };
         let project = app.session.project.clone();
         if playing {
-            let preroll = app.playback.preroll.is_some();
-            app.frames.schedule_playback(key, rate, scale, &project, app.playback.speed, preroll);
+            let preroll = which == Which::Program && app.playback.preroll.is_some();
+            let speed = if which == Which::Program { app.playback.speed } else { app.source_playback.clock.speed };
+            app.frames.schedule_playback(key, rate, scale, &project, speed, preroll);
             if preroll {
                 app.playback.preroll_ready = app.frames.preroll_ready(key, app.playback.speed, rate.frame_at(duration) - 1);
             }
@@ -201,10 +225,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
             app.monitor_inexact = true;
         }
         if playing {
-            if std::mem::take(&mut app.playback.hidden) {
-                app.playback.meter.resync(frame, exact);
+            let clock = if which == Which::Program { &mut app.playback } else { &mut app.source_playback.clock };
+            if std::mem::take(&mut clock.hidden) {
+                clock.meter.resync(frame, exact);
             } else {
-                app.playback.meter.refresh(frame, exact);
+                clock.meter.refresh(frame, exact);
             }
         }
         if let Some(tex) = shown {
@@ -253,7 +278,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
         ui.painter().circle_filled(pos2(video_area.min.x + 10.0, video_area.min.y + 10.0), 4.0, c);
     }
     // Click/drag in the picture: the Hand tool pans a magnified picture, otherwise focus.
-    let pic_resp = ui.interact(pic, egui::Id::new((prefix, "pic")), Sense::click());
+    let pic_resp = ui.interact(pic, egui::Id::new((prefix, "pic")), if show_picture { Sense::click_and_drag() } else { Sense::hover() });
     app.auto.add(&format!("{prefix}.picture"), pic.intersect(video_area), "picture");
     if show_picture {
         monitor_view::pan_input(app, ui, which, video_area, pic);
@@ -269,6 +294,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     if let Some((top, left)) = ruler_rects {
         monitor_view::rulers(app, ui, which, top, left, video_area, pic, frame_size);
     }
+    if which == Which::Source && show_picture && pic_resp.drag_started() && app.ui.tool != crate::state::Tool::Hand {
+        crate::panels::source_drag::begin(app, ui, true, true);
+    }
     if pic_resp.double_clicked() && which == Which::Source {
         // (Premiere opens the clip's settings; we show info)
         app.ui.status = name.clone();
@@ -279,13 +307,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     let tc = format_time(time, rate, drop_frame, TimeDisplay::Timecode, 48000);
     ui.painter().text(pos2(row1.min.x, row1.center().y), Align2::LEFT_CENTER, &tc, Tokens::timecode(), t.timecode);
     app.auto.add(&format!("{prefix}.timecode"), Rect::from_min_size(row1.min, vec2(110.0, row1.height())), &tc);
-    let dur_tc = format_time(
-        mark_out.map(|o| o + rate.frame_duration()).unwrap_or(duration) - mark_in.unwrap_or(Tick::ZERO),
-        rate,
-        drop_frame,
-        TimeDisplay::Timecode,
-        48000,
-    );
+    let dur_tc = format_time(mark_out.map(|o| o + rate.frame_duration()).unwrap_or(duration) - range_start, rate, drop_frame, TimeDisplay::Timecode, 48000);
     ui.painter().text(pos2(row1.max.x, row1.center().y), Align2::RIGHT_CENTER, &dur_tc, Tokens::timecode(), t.text_dim);
     // zoom + resolution dropdowns centred-ish
     let zr = Rect::from_min_size(pos2(row1.min.x + 116.0, row1.min.y), vec2(70.0, 24.0));
@@ -298,6 +320,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     monitor_view::zoom_menu(app, &zresp, which);
     let res = mv.res;
     let rr = Rect::from_min_size(pos2(row1.max.x - 196.0, row1.min.y), vec2(62.0, 24.0));
+    if which == Which::Source && rr.min.x > zr.max.x + 12.0 {
+        crate::panels::source_drag::controls(app, ui, Rect::from_min_max(pos2(zr.max.x + 6.0, row1.min.y), pos2(rr.min.x - 6.0, row1.min.y + 24.0)));
+    }
     let rresp = crate::widgets::dropdown_text(ui, rr, crate::i18n::t(res.label()), &t, egui::Id::new((prefix, "res")));
     app.auto.add(&format!("{prefix}.resolution"), rr, "Select Playback Resolution");
     egui::Popup::menu(&rresp).show(|ui| {
@@ -317,6 +342,16 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
         let mv = monitor_view::view_mut(app, which);
         ui.checkbox(&mut mv.safe_margins, tl!("Safe Margins"));
         ui.checkbox(&mut mv.show_transport, tl!("Show Transport Controls"));
+        if which == Which::Source {
+            let mut looping = app.source_playback.clock.looping;
+            let response = ui.checkbox(&mut looping, tl!("Loop marked range"));
+            app.auto.add("source.settings.loop", response.rect, "Loop marked range");
+            if response.changed()
+                && let Err(e) = crate::menus::invoke(app, &ctx, "playback.loop", json!({"monitor":"source"}))
+            {
+                app.ui.status = e;
+            }
+        }
         if which == Which::Program {
             ui.separator();
             ui.checkbox(&mut app.ui.show_scopes, tl!("Lumetri Scopes"));
@@ -445,10 +480,13 @@ fn mini_timeline(
     mark_out: Option<Tick>,
 ) {
     let t = app.tokens;
-    let p = ui.painter();
     let duration = end;
     let dur = (end - origin).0.max(1) as f64;
     let xof = |tk: Tick| bar.min.x + (((tk - origin).0 as f64 / dur) as f32).clamp(0.0, 1.0) * bar.width();
+    let resp = ui.interact(bar, egui::Id::new((which as u8, "scrub")), Sense::click_and_drag());
+    app.auto.add(if which == Which::Program { "program.scrubBar" } else { "source.scrubBar" }, bar, "scrub bar");
+    let interaction = crate::panels::source_range::interact(app, ui, bar, which);
+    let p = ui.painter();
     // ticks: minor 4 pt, major 10 pt, ~20 pt spacing
     let n = ((bar.width() / 20.0) as i32).max(2);
     for i in 0..=n {
@@ -456,10 +494,40 @@ fn mini_timeline(
         let h = if i % 5 == 0 { 8.0 } else { 3.5 };
         p.line_segment([pos2(x, bar.max.y - h), pos2(x, bar.max.y)], Stroke::new(1.0, t.text_faint));
     }
+    let a = xof(interaction.range.map(|r| r.start).unwrap_or(mark_in.unwrap_or(origin)));
+    // Out includes its frame; both the shading and its bracket end at the following boundary.
+    let b = xof(interaction.range.map(|r| r.end()).unwrap_or_else(|| mark_out.map(|o| Tick(o.0.saturating_add(rate.frame_duration().0))).unwrap_or(duration)))
+        .max(a);
     if mark_in.is_some() || mark_out.is_some() {
-        let a = xof(mark_in.unwrap_or(origin));
-        let b = xof(mark_out.map(|o| o + rate.frame_duration()).unwrap_or(duration));
-        p.rect_filled(Rect::from_min_max(pos2(a, bar.min.y + 8.0), pos2(b, bar.max.y)), 0.0, Color32::from_rgb(0x5c, 0x5c, 0x5c));
+        p.rect_filled(Rect::from_min_max(pos2(a, bar.min.y + 8.0), pos2(b, bar.max.y)), 0.0, Color32::from_rgba_unmultiplied(0x5c, 0x5c, 0x5c, 128));
+    }
+    if mark_in.is_some() || mark_out.is_some() {
+        // Curly braces sit inside the gray band, with their waist at its exact range edge.
+        let top = bar.min.y + 8.0;
+        let bottom = bar.max.y;
+        let mid = (top + bottom) * 0.5;
+        for (x, direction, hot) in [(a, 1.0_f32, interaction.in_hot), (b, -1.0_f32, interaction.out_hot)] {
+            if hot || (direction > 0.0 && mark_in.is_none()) || (direction < 0.0 && mark_out.is_none()) {
+                continue;
+            }
+            let point = |offset: f32, y: f32| pos2(x + direction * offset, y);
+            p.line(
+                vec![
+                    point(4.0, top),
+                    point(2.8, top),
+                    point(2.0, top + 1.0),
+                    point(2.0, mid - 2.0),
+                    point(1.4, mid - 1.0),
+                    point(0.0, mid),
+                    point(1.4, mid + 1.0),
+                    point(2.0, mid + 2.0),
+                    point(2.0, bottom - 1.0),
+                    point(2.8, bottom),
+                    point(4.0, bottom),
+                ],
+                Stroke::new(1.0, t.playhead),
+            );
+        }
     }
     // markers: the sequence's (Program), the clip's or the subclip's inherited ones (Source)
     let markers = match which {
@@ -488,13 +556,23 @@ fn mini_timeline(
         Stroke::NONE,
     ));
     p.line_segment([pos2(x, hy + 8.0), pos2(x, bar.max.y)], Stroke::new(1.0, t.playhead));
-    let resp = ui.interact(bar, egui::Id::new((which as u8, "scrub")), Sense::click_and_drag());
-    app.auto.add(if which == Which::Program { "program.scrubBar" } else { "source.scrubBar" }, bar, "scrub bar");
-    if (resp.dragged() || resp.clicked())
-        && let Some(pos) = resp.interact_pointer_pos()
-    {
-        let f = ((pos.x - bar.min.x) / bar.width()).clamp(0.0, 1.0) as f64;
-        let tk = rate.snap(origin + Tick((f * dur) as i64));
+    if interaction.in_hot {
+        crate::panels::source_range::trim_cue(p, a, bar, 4.0);
+    }
+    if interaction.out_hot {
+        crate::panels::source_range::trim_cue(p, b, bar, -4.0);
+    }
+    let scrub = interaction.scrub.or_else(|| {
+        if !interaction.handled && (resp.dragged() || resp.clicked()) {
+            resp.interact_pointer_pos().map(|pos| {
+                let f = ((pos.x - bar.min.x) / bar.width().max(1.0)).clamp(0.0, 1.0) as f64;
+                rate.snap(origin + Tick((f * dur) as i64))
+            })
+        } else {
+            None
+        }
+    });
+    if let Some(tk) = scrub {
         match which {
             Which::Program => {
                 app.stop();
@@ -517,12 +595,12 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
             (Icon::MarkOut, "src.markOut", tl!("Mark Out (O)")),
             (Icon::GoToIn, "src.goIn", tl!("Go to In (Shift+I)")),
             (Icon::StepBack, "src.stepBack", tl!("Step Back 1 Frame (Left)")),
-            (Icon::Play, "src.play", tl!("Play-Stop Toggle (Space)")),
+            (if app.source_playback.clock.playing { Icon::Pause } else { Icon::Play }, "source.playback.toggle", tl!("Play-Stop Toggle (Space)")),
             (Icon::StepFwd, "src.stepFwd", tl!("Step Forward 1 Frame (Right)")),
             (Icon::GoToOut, "src.goOut", tl!("Go to Out (Shift+O)")),
             (Icon::Insert, "source.insert", tl!("Insert (,)")),
             (Icon::Overwrite, "source.overwrite", tl!("Overwrite (.)")),
-            (Icon::Camera, "exportFrame", tl!("Export Frame (Shift+E)")),
+            (Icon::Camera, "exportFrame", tl!("Export Frame")),
             (Icon::Proxy, "media.toggleProxies", tl!("Toggle Proxies")),
         ]
     } else {
@@ -537,7 +615,7 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
             (Icon::GoToOut, "markers.goToOut", tl!("Go to Out (Shift+O)")),
             (Icon::Lift, "sequence.lift", tl!("Lift (;)")),
             (Icon::Extract, "sequence.extract", tl!("Extract (')")),
-            (Icon::Camera, "exportFrame", tl!("Export Frame (Shift+E)")),
+            (Icon::Camera, "exportFrame", tl!("Export Frame")),
             (Icon::Proxy, "media.toggleProxies", tl!("Toggle Proxies")),
         ]
     };
@@ -572,12 +650,9 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
                     source_nav(app, cmd);
                     Ok(serde_json::Value::Null)
                 }
-                "src.play" => Ok(serde_json::Value::Null),
-                "exportFrame" => {
-                    app.ui.status = tl!("Export Frame: use Export mode (M6)").into();
-                    Ok(serde_json::Value::Null)
-                }
-                c => crate::menus::invoke(app, &ctx, c, json!({})),
+
+                "exportFrame" => crate::menus::invoke(app, &ctx, "file.exportFrame", json!({"monitor": if src { "source" } else { "program" }})),
+                c => crate::menus::invoke(app, &ctx, c, json!({"monitor": if src { "source" } else { "program" }})),
             };
             if let Err(e) = r {
                 app.ui.status = e;

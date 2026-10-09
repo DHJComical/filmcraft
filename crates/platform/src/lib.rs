@@ -8,7 +8,8 @@
 //! driver) registration does nothing and reports [`Availability::Unavailable`]. It also registers a
 //! hardware H.264 encoder factory (`filmcraft_export::register_encoder`) that only acts when an
 //! export asks for it (`ExportSettings::hardware_encoding` = `Auto`), see [`hardware_encode`]; on
-//! macOS and on Windows (NVENC, [`nvenc`]) it also makes the H.265 export format available.
+//! macOS and on Windows (NVENC, [`nvenc`]) it also makes the H.265 export format available, and on Windows
+//! (Main 10) lets HDR sequences export as HDR H.265.
 //!
 //! Hardware decoding never makes a file undecodable:
 //!
@@ -38,7 +39,7 @@ pub mod hardware_encode;
 pub mod hybrid;
 #[cfg(target_os = "windows")]
 pub mod media_foundation;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", all(target_os = "linux", target_pointer_width = "64")))]
 pub mod nvenc;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod vaapi;
@@ -64,6 +65,8 @@ pub enum Availability {
 /// harmless). Streams they do not take, and every stream while hardware decoding is Off, keep
 /// using FilmCraft's own decoders.
 pub fn register() -> Availability {
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    filmcraft_export::register_encoder(nvenc::export::factory);
     #[cfg(target_os = "macos")]
     {
         filmcraft_codecs::register_video_decoder(videotoolbox_factory);
@@ -81,6 +84,9 @@ pub fn register() -> Availability {
     #[cfg(target_os = "windows")]
     {
         filmcraft_export::register_format_probe(filmcraft_export::Format::Hevc, nvenc::hevc_available);
+        // HDR sequences export as HEVC Main 10 (PQ / HLG) only where NVENC has a 10-bit encoder; elsewhere
+        // (and on macOS, whose VideoToolbox path is 8-bit) they are tone-mapped to SDR, as before
+        filmcraft_export::register_hdr_probe(filmcraft_export::Format::Hevc, nvenc::hevc_hdr_available);
         nvenc::warm_hevc_probe();
     }
     #[cfg(target_os = "windows")]
