@@ -31,6 +31,7 @@ macro_rules! tlf {
 
 pub mod automation;
 pub mod brand;
+mod cjk;
 pub mod control;
 pub mod crash;
 pub mod credits;
