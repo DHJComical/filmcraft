@@ -113,13 +113,17 @@ impl VideoEncoder for NvencEncoder {
             // Main 10 takes the encoded R'G'B' floats: 10-bit limited-range BT.2020 NCL (or the signal's matrix)
             (true, Some(rgb)) => {
                 let (kr, kb) = self.signal.kr_kb();
-                filmcraft_export::rgbf_to_yuv420_10(rgb, w, h, kr, kb, &mut self.y16, &mut self.u16, &mut self.v16)?;
+                filmcraft_export::timed(filmcraft_export::Stage::Convert, || {
+                    filmcraft_export::rgbf_to_yuv420_10(rgb, w, h, kr, kb, &mut self.y16, &mut self.u16, &mut self.v16)
+                })?;
                 self.enc.encode_10(&self.y16, &self.u16, &self.v16, f.index).map_err(|e| ExportError::Encode(format!("NVENC: {e}{hint}")))?
             }
             (true, None) => return Err(ExportError::Unsupported("NVENC Main 10 needs the HDR picture (EncoderFrame::hdr)".into())),
             (false, Some(_)) => return Err(ExportError::Unsupported("NVENC Main (8-bit) does not take HDR pictures".into())),
             (false, None) => {
-                filmcraft_export::rgba_to_yuv420_8(f.rgba, w, h, &mut self.y, &mut self.u, &mut self.v);
+                filmcraft_export::timed(filmcraft_export::Stage::Convert, || {
+                    filmcraft_export::rgba_to_yuv420_8(f.rgba, w, h, &mut self.y, &mut self.u, &mut self.v)
+                });
                 self.enc.encode(&self.y, &self.u, &self.v, f.index).map_err(|e| ExportError::Encode(format!("NVENC: {e}{hint}")))?
             }
         };
