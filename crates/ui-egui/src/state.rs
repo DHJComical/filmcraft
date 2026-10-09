@@ -755,6 +755,11 @@ pub struct SequenceSettingsDraft {
     pub tab: String,
     /// The sequence's name (its Project panel item); a blank name keeps the current one.
     pub name: String,
+    /// File ▸ New ▸ Sequence…: the dialog makes a new sequence (`file.newSequence`) with these
+    /// settings and `video_tracks` / `audio_tracks` tracks, instead of changing the active one.
+    pub new_sequence: bool,
+    pub video_tracks: u32,
+    pub audio_tracks: u32,
     pub fps_num: i64,
     pub fps_den: i64,
     pub width: u32,
@@ -774,6 +779,9 @@ impl Default for SequenceSettingsDraft {
         Self {
             tab: "general".into(),
             name: String::new(),
+            new_sequence: false,
+            video_tracks: 3,
+            audio_tracks: 3,
             fps_num: 24_000,
             fps_den: 1001,
             width: 1920,

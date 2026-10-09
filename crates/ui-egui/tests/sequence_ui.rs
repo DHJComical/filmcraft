@@ -591,3 +591,59 @@ fn sequence_settings_dialog_renames_the_sequence() {
     assert_eq!(name(&mut d), "Main Edit");
     assert_eq!(d.app().session.history.undo.len(), history);
 }
+
+/// File ▸ New ▸ Sequence… (Cmd+N) made a default sequence at once; it opens New Sequence: the
+/// Sequence Settings dialog from the default settings, named like the command would name it, with
+/// a Tracks tab. OK makes the sequence with what was chosen (one undo step); Cancel makes none.
+#[test]
+fn new_sequence_opens_its_dialog() {
+    let mut d = Driver::demo();
+    let sequences = |d: &mut Driver| d.app().session.project.sequences().count();
+    let n0 = sequences(&mut d);
+    let r = d.ok("ui.menu.invoke", json!({"id": "file.newSequence"}));
+    assert_eq!(r["dialog"], "newSequence", "{r}");
+    d.frames(10);
+    assert_eq!(sequences(&mut d), n0, "nothing is made before OK");
+    assert_eq!(d.label("sequenceSettings.name"), format!("Sequence {:02}", n0 + 1));
+    assert_eq!(d.label("sequenceSettings.timebase"), "23.976 frames/second");
+    assert!(d.ids("sequenceSettings.tab.").iter().any(|i| i == "sequenceSettings.tab.tracks"));
+    assert!(d.ids("sequenceSettings.tab.color").is_empty(), "New Sequence has General and Tracks");
+    d.click("sequenceSettings.tab.tracks");
+    assert_eq!(d.label("sequenceSettings.tracks.video"), "3");
+    assert_eq!(d.label("sequenceSettings.tracks.audio"), "3");
+    d.snapshot("new-sequence-tracks", "sequenceSettings.");
+    // set the draft as typing would: a vertical 30 fps sequence with 2 video and 4 audio tracks
+    {
+        let s = &mut d.app().ui.sequence_settings;
+        s.name = "Shorts".into();
+        (s.width, s.height) = (1080, 1920);
+        (s.fps_num, s.fps_den) = (30, 1);
+        (s.video_tracks, s.audio_tracks) = (2, 4);
+    }
+    d.frames(2);
+    d.click("sequenceSettings.ok");
+    assert!(d.ids("sequenceSettings.").is_empty(), "dialog closed");
+    assert_eq!(sequences(&mut d), n0 + 1);
+    let id = d.app().session.state.active_sequence.unwrap();
+    assert_eq!(d.app().session.project.item(id).unwrap().name, "Shorts", "the new sequence is the open one");
+    let q = d.app().session.active_sequence().unwrap().clone();
+    assert_eq!((q.settings.width, q.settings.height, q.settings.frame_rate), (1080, 1920, filmcraft_engine::time::FrameRate::FPS_30));
+    assert_eq!((q.video_tracks.len(), q.audio_tracks.len()), (2, 4));
+    d.exec("edit.undo", json!({}));
+    assert_eq!(sequences(&mut d), n0, "one undo step");
+    // Cancel makes nothing
+    d.ok("ui.menu.invoke", json!({"id": "file.newSequence"}));
+    d.frames(10);
+    d.click("sequenceSettings.cancel");
+    assert_eq!(sequences(&mut d), n0);
+    // with params (a clip, an agent) the command still makes the sequence directly
+    d.ok("ui.menu.invoke", json!({"id": "file.newSequence", "params": {"name": "Direct"}}));
+    d.frames(2);
+    assert_eq!(sequences(&mut d), n0 + 1);
+    // and Sequence Settings… is still the active sequence's dialog, with its three tabs
+    d.ok("ui.menu.invoke", json!({"id": "sequence.settings"}));
+    d.frames(10);
+    assert_eq!(d.label("sequenceSettings.name"), "Direct");
+    assert!(d.ids("sequenceSettings.tab.color").iter().any(|i| i == "sequenceSettings.tab.color"));
+    d.click("sequenceSettings.cancel");
+}

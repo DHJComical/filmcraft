@@ -449,6 +449,12 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
             crate::panels::sequence_settings::open(app);
             return Ok(json!({"dialog": "sequenceSettings"}));
         }
+        // File ▸ New ▸ Sequence… (Cmd+N) opens New Sequence; with params (a clip, an agent) it
+        // makes the sequence directly
+        "file.newSequence" if params.as_object().is_none_or(|m| m.is_empty()) => {
+            crate::panels::sequence_settings::open_new(app);
+            return Ok(json!({"dialog": "newSequence"}));
+        }
         "sequence.colorSettings" if params.as_object().is_none_or(|m| m.is_empty()) => {
             filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session))?;
             crate::panels::color_dialogs::open_sequence(app);
