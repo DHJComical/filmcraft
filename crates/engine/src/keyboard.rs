@@ -559,7 +559,7 @@ fn export_frame(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let img = s.render_program(1.0).ok_or(EngineError::NoSequence)?;
     let (w, h) = (img.w as u32, img.h as u32);
-    let bytes = filmcraft_export::encode_still(format, img.to_rgba8(), w, h).map_err(|e| EngineError::Other(e.to_string()))?;
+    let bytes = filmcraft_export::encode_still(format, img.to_rgba8(), w, h, false).map_err(|e| EngineError::Other(e.to_string()))?;
     s.services.write_file(&path, &bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     let mut out = json!({"path": path, "width": w, "height": h});
     if p.get("import").and_then(Value::as_bool).unwrap_or(false) {
