@@ -68,6 +68,10 @@ impl Driver {
         v["result"].clone()
     }
 
+    fn exec(&mut self, command: &str, params: Value) -> Value {
+        self.ok("engine.execute", json!({"command": command, "params": params}))
+    }
+
     fn app(&self) -> &FilmcraftApp {
         self.harness.state()
     }
@@ -268,4 +272,29 @@ fn hover_bracket_screenshots() {
         d.hover(pos2(x, y));
         d.screenshot(&format!("hover-{name}"));
     }
+}
+
+/// A caption's Out edge, grabbed 2 px inside and dragged inward, trims the caption. The gesture
+/// used to be decided where the drag was recognised, about 9 px inside (2 px plus egui's 6 pt drag
+/// threshold), past the 5 px edge zone, so the caption moved.
+#[test]
+fn dragging_a_caption_edge_inward_trims_it() {
+    let mut d = Driver::demo();
+    let id = d.exec("captions.add", json!({"seconds": 2.0, "durationSeconds": 2.0}))["caption"].as_u64().expect("caption id");
+    d.frames(4);
+    let name = format!("timeline.caption.{id}");
+    let els = d.ok("ui.elements", json!({"prefix": name}));
+    let el = els.as_array().expect("elements").iter().find(|e| e["id"] == name.as_str()).unwrap_or_else(|| panic!("no {name}: {els}")).clone();
+    let r: Vec<f32> = el["rect"].as_array().expect("rect").iter().map(|v| v.as_f64().expect("number") as f32).collect();
+    let (x1, y) = (r[0] + r[2], r[1] + r[3] / 2.0);
+    let span = |d: &Driver| {
+        let seq = d.app().session.active_sequence().expect("sequence");
+        let (_, c) = seq.find_caption(ClipId(id)).expect("caption");
+        (c.start.0, c.end().0)
+    };
+    let (s0, e0) = span(&d);
+    d.drag(pos2(x1 - 2.0, y), pos2(x1 - 32.0, y), 30);
+    let (s1, e1) = span(&d);
+    assert_eq!(s1, s0, "the caption's start stayed: trimmed, not moved");
+    assert!(e1 < e0, "the caption's end moved in: {e0} → {e1}");
 }
