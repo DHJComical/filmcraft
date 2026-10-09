@@ -1,6 +1,10 @@
 //! Sequence ▸ Sequence Settings…, laid out as Premiere Pro's dialog: General, Color Management and
 //! VR Properties tabs, Cancel / OK.
 //!
+//! File ▸ New ▸ Sequence… opens the same dialog as New Sequence ([`open_new`]): the General tab
+//! starting from the default settings, and a Tracks tab with the number of video and audio
+//! tracks (`tracks.video`, `tracks.audio`); OK runs `file.newSequence`.
+//!
 //! What it changes (one `sequence.settings` command, one undo step): Timebase, Frame Size (with
 //! "Scale motion effects proportionally when changing frame size", on by default), drop-frame or
 //! non-drop-frame timecode for the NTSC rates, audio Channel Format and Sample Rate, Maximum Render
@@ -14,7 +18,7 @@
 //! FilmCraft always composites in linear light.
 //!
 //! Automation ids (`sequenceSettings.` + …): `tab.general`, `tab.color`, `tab.vr`; General:
-//! `editingMode`, `timebase` (+ `timebase.option.<num>/<den>` while open), `width`, `height`,
+//! `name`, `editingMode`, `timebase` (+ `timebase.option.<num>/<den>` while open), `width`, `height`,
 //! `aspect`, `scaleMotion`, `par`, `fields`, `videoDisplay` (+ `videoDisplay.option.<df|ndf|tc>`),
 //! `channelFormat` (+ `channelFormat.option.<Stereo|Mono|5.1|Adaptive>`), `channels`, `sampleRate`
 //! (+ `sampleRate.option.<hz>`), `audioDisplay`, `previewFormat`, `previewCodec`, `previewWidth`,
@@ -68,8 +72,13 @@ fn mix_name(c: AudioChannels) -> &'static str {
 pub fn open(app: &mut FilmcraftApp) {
     let Some(q) = app.session.active_sequence() else { return };
     let st = &q.settings;
+    let name = app.session.state.active_sequence.and_then(|id| app.session.project.item(id)).map(|i| i.name.clone()).unwrap_or_default();
     app.ui.sequence_settings = SequenceSettingsDraft {
         tab: "general".into(),
+        name,
+        new_sequence: false,
+        video_tracks: 3,
+        audio_tracks: 3,
         fps_num: st.frame_rate.num,
         fps_den: st.frame_rate.den,
         width: st.width,
@@ -84,6 +93,68 @@ pub fn open(app: &mut FilmcraftApp) {
         auto_tone_map: st.color.auto_tone_map,
     };
     app.dialog = Some(crate::Dialog::SequenceSettings);
+}
+
+/// File ▸ New ▸ Sequence…: the dialog as New Sequence, from the default settings, named like
+/// `file.newSequence` would name it, with three video and three audio tracks.
+pub fn open_new(app: &mut FilmcraftApp) {
+    let st = SequenceSettings::default();
+    let n = app.session.project.sequences().count() + 1;
+    app.ui.sequence_settings = SequenceSettingsDraft {
+        tab: "general".into(),
+        new_sequence: true,
+        video_tracks: 3,
+        audio_tracks: 3,
+        fps_num: st.frame_rate.num,
+        fps_den: st.frame_rate.den,
+        width: st.width,
+        height: st.height,
+        scale_motion: true,
+        drop_frame: st.drop_frame && st.frame_rate.supports_drop_frame(),
+        mix: mix_name(st.audio_master).into(),
+        sample_rate: st.sample_rate,
+        max_render_quality: st.max_render_quality,
+        working_space: st.color.working.id().into(),
+        wide_gamut: st.color.wide_gamut,
+        auto_tone_map: st.color.auto_tone_map,
+        name: format!("Sequence {n:02}"),
+    };
+    app.dialog = Some(crate::Dialog::SequenceSettings);
+}
+
+/// The `file.newSequence` parameters for a New Sequence draft. Settings `file.newSequence` doesn't
+/// take (drop-frame timecode, Maximum Render Quality) are the second map, for `sequence.settings`
+/// on the new sequence; empty when they are the defaults.
+fn new_sequence_params(d: &SequenceSettingsDraft) -> (Map<String, Value>, Map<String, Value>) {
+    let mut p = Map::new();
+    let name = d.name.trim();
+    if !name.is_empty() {
+        p.insert("name".into(), json!(name));
+    }
+    p.insert("width".into(), json!(d.width));
+    p.insert("height".into(), json!(d.height));
+    p.insert("fps".into(), json!(rate(d).as_f64()));
+    p.insert("sampleRate".into(), json!(d.sample_rate));
+    p.insert("mix".into(), json!(d.mix));
+    p.insert("video".into(), json!(d.video_tracks.min(256)));
+    p.insert("audio".into(), json!(d.audio_tracks.min(256)));
+    // what's left: only the settings `file.newSequence` has no parameter for
+    let after = SequenceSettings { frame_rate: rate(d), width: d.width, height: d.height, sample_rate: d.sample_rate, ..Default::default() };
+    let mut rest = changes(d, &after, name);
+    rest.retain(|k, _| matches!(k.as_str(), "dropFrame" | "maxRenderQuality"));
+    (p, rest)
+}
+
+/// The Tracks tab of New Sequence: how many video and audio tracks the sequence starts with.
+fn tracks(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, elems: &mut Elems) {
+    for (id, label, n) in [("video", "Video:", &mut d.video_tracks), ("audio", "Audio:", &mut d.audio_tracks)] {
+        ui.horizontal(|ui| {
+            ui.label(t(label));
+            let r = ui.add(egui::DragValue::new(n).range(0..=256));
+            elems.push((format!("sequenceSettings.tracks.{id}"), r.rect, n.to_string()));
+            ui.label(tl!("tracks"));
+        });
+    }
 }
 
 fn rate(d: &SequenceSettingsDraft) -> FrameRate {
@@ -134,9 +205,14 @@ fn par_label(par: (u32, u32)) -> String {
     }
 }
 
-/// The parameters for `sequence.settings` that differ from `cur`; empty when nothing changed.
-fn changes(d: &SequenceSettingsDraft, cur: &SequenceSettings) -> Map<String, Value> {
+/// The parameters for `sequence.settings` that differ from `cur` (and the sequence's name
+/// `cur_name`); empty when nothing changed. A blank name keeps the current one.
+fn changes(d: &SequenceSettingsDraft, cur: &SequenceSettings, cur_name: &str) -> Map<String, Value> {
     let mut p = Map::new();
+    let name = d.name.trim();
+    if !name.is_empty() && name != cur_name {
+        p.insert("name".into(), json!(name));
+    }
     let r = rate(d);
     if r != cur.frame_rate {
         p.insert("fps".into(), json!(r.as_f64()));
@@ -216,6 +292,10 @@ fn general(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, cur: &SequenceSetti
         .map(|l| ui.painter().layout_no_wrap(t(l).to_string(), font.clone(), egui::Color32::WHITE).size().x)
         .fold(0.0, f32::max);
     let list_w = 260.0;
+    row(ui, label_w, "Sequence Name:", true, |ui| {
+        let r = ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(list_w));
+        elems.push(("sequenceSettings.name".into(), r.rect, d.name.clone()));
+    });
     row(ui, label_w, "Editing Mode:", false, |ui| fixed_combo(ui, elems, "editingMode", "Custom", list_w, NOT_YET));
     row(ui, label_w, "Timebase:", true, |ui| {
         let r = rate(d);
@@ -375,8 +455,16 @@ fn vr(ui: &mut egui::Ui, elems: &mut Elems) {
 
 /// Draw the dialog. Returns whether it stays open.
 pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
-    let Some(q) = app.session.active_sequence() else { return false };
-    let cur = q.settings.clone();
+    let new_sequence = app.ui.sequence_settings.new_sequence;
+    // New Sequence compares against the defaults it started from; Sequence Settings against the
+    // active sequence
+    let (cur, cur_name) = if new_sequence {
+        (SequenceSettings::default(), String::new())
+    } else {
+        let Some(q) = app.session.active_sequence() else { return false };
+        let name = app.session.state.active_sequence.and_then(|id| app.session.project.item(id)).map(|i| i.name.clone()).unwrap_or_default();
+        (q.settings.clone(), name)
+    };
     let audio_samples = app.session.project.settings.audio_display_samples;
     let accent = app.tokens.accent;
     let mut d = app.ui.sequence_settings.clone();
@@ -384,7 +472,13 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
     let mut apply = false;
     let mut elems: Elems = Vec::new();
     let max_h = ctx.content_rect().height() * 0.8;
-    egui::Window::new(tl!("Sequence Settings"))
+    let title = if new_sequence { tl!("New Sequence") } else { tl!("Sequence Settings") };
+    let tabs: &[(&str, &str)] = if new_sequence {
+        &[("general", "General"), ("tracks", "Tracks")]
+    } else {
+        &[("general", "General"), ("color", "Color Management"), ("vr", "VR Properties")]
+    };
+    egui::Window::new(title)
         .id(egui::Id::new("Sequence Settings"))
         .collapsible(false)
         .resizable(false)
@@ -393,7 +487,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
         .show(ctx, |ui| {
             ui.set_width(620.0);
             ui.horizontal(|ui| {
-                for (id, label) in [("general", "General"), ("color", "Color Management"), ("vr", "VR Properties")] {
+                for &(id, label) in tabs {
                     let r = ui.selectable_label(d.tab == id, t(label));
                     if r.clicked() {
                         d.tab = id.to_string();
@@ -403,8 +497,9 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
             });
             ui.separator();
             egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| match d.tab.as_str() {
-                "color" => color(ui, &mut d, &mut elems),
-                "vr" => vr(ui, &mut elems),
+                "color" if !new_sequence => color(ui, &mut d, &mut elems),
+                "tracks" if new_sequence => tracks(ui, &mut d, &mut elems),
+                "vr" if !new_sequence => vr(ui, &mut elems),
                 _ => general(ui, &mut d, &cur, audio_samples, &mut elems),
             });
             ui.add_space(10.0);
@@ -430,8 +525,20 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
     if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && !ctx.egui_wants_keyboard_input() {
         apply = true;
     }
+    if apply && new_sequence {
+        let (p, rest) = new_sequence_params(&d);
+        let r = app
+            .session
+            .execute("file.newSequence", Value::Object(p))
+            .and_then(|_| if rest.is_empty() { Ok(Value::Null) } else { app.session.execute("sequence.settings", Value::Object(rest)) });
+        if let Err(e) = r {
+            app.ui.status = e.to_string();
+        }
+        app.ui.sequence_settings = d;
+        return false;
+    }
     if apply {
-        let p = changes(&d, &cur);
+        let p = changes(&d, &cur, &cur_name);
         // nothing changed: OK closes the dialog and adds no undo step
         if !p.is_empty()
             && let Err(e) = app.session.execute("sequence.settings", Value::Object(p))
@@ -466,19 +573,58 @@ mod tests {
     }
 
     #[test]
+    fn new_sequence_sends_its_settings_to_the_command() {
+        let d = SequenceSettingsDraft {
+            new_sequence: true,
+            name: " Shorts ".into(),
+            width: 1080,
+            height: 1920,
+            video_tracks: 2,
+            audio_tracks: 4,
+            ..Default::default()
+        };
+        let (p, rest) = new_sequence_params(&d);
+        assert_eq!(
+            Value::Object(p),
+            json!({"name":"Shorts","width":1080,"height":1920,"fps":24_000.0/1001.0,"sampleRate":48_000,"mix":"Stereo","video":2,"audio":4})
+        );
+        assert!(rest.is_empty(), "everything else is the default: {rest:?}");
+        // what file.newSequence has no parameter for follows on the new sequence; a blank name
+        // lets the command name it
+        let d = SequenceSettingsDraft {
+            new_sequence: true,
+            name: " ".into(),
+            fps_num: 30_000,
+            fps_den: 1001,
+            drop_frame: true,
+            max_render_quality: true,
+            ..Default::default()
+        };
+        let (p, rest) = new_sequence_params(&d);
+        assert!(p.get("name").is_none());
+        assert_eq!(Value::Object(rest), json!({"dropFrame":true,"maxRenderQuality":true}));
+    }
+
+    #[test]
     fn only_changed_settings_are_sent() {
         let cur = SequenceSettings::default();
         let mut d = SequenceSettingsDraft::default();
-        assert!(changes(&d, &cur).is_empty(), "the defaults match: nothing to send");
+        assert!(changes(&d, &cur, "").is_empty(), "the defaults match: nothing to send");
         d.width = 1280;
         d.height = 720;
         d.max_render_quality = true;
-        let p = changes(&d, &cur);
+        let p = changes(&d, &cur, "");
         assert_eq!(Value::Object(p), json!({"width":1280,"height":720,"scaleMotion":true,"maxRenderQuality":true}));
         // drop-frame only travels for a rate that has it
         let mut d = SequenceSettingsDraft { drop_frame: true, ..Default::default() };
-        assert!(changes(&d, &cur).is_empty());
+        assert!(changes(&d, &cur, "").is_empty());
         (d.fps_num, d.fps_den) = (30_000, 1001);
-        assert_eq!(Value::Object(changes(&d, &cur)), json!({"fps":30_000.0/1001.0,"dropFrame":true}));
+        assert_eq!(Value::Object(changes(&d, &cur, "")), json!({"fps":30_000.0/1001.0,"dropFrame":true}));
+        // the name travels when it changed; blank or unchanged it doesn't
+        let d = SequenceSettingsDraft { name: "  Rough Cut  ".into(), ..Default::default() };
+        assert_eq!(Value::Object(changes(&d, &cur, "Sequence 01")), json!({"name":"Rough Cut"}));
+        assert!(changes(&d, &cur, "Rough Cut").is_empty());
+        let d = SequenceSettingsDraft { name: "   ".into(), ..Default::default() };
+        assert!(changes(&d, &cur, "Sequence 01").is_empty());
     }
 }
