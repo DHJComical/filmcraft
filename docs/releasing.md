@@ -104,6 +104,15 @@ nor the portable zip needs the Visual C++ redistributable.
 `.tar.gz` tree. The packages install both programs, the desktop entry, the AppStream metainfo, the
 icons and the licence files.
 
+The Linux tarball includes `install.sh`. Extract it, open a terminal in the extracted
+directory and run `./install.sh` to install both programs and their desktop integration
+under `~/.local` (no administrator permissions needed). The application-menu entry uses
+the installed binary's absolute path; add `~/.local/bin` to `PATH` for terminal commands.
+Run the installer again to update. For a system-wide installation, use
+`sudo ./install.sh --prefix /usr/local`. A custom absolute `--prefix` is also supported;
+its `share` directory must be in the desktop's data search path to appear in the menu.
+Prefixes containing `=`, `%` or control characters are rejected for desktop-launcher compatibility.
+
 The jobs run on `ubuntu-22.04`, the oldest GitHub-hosted image, so the binaries only need
 glibc 2.35 or newer: Ubuntu 22.04+, Debian 12+, Fedora 36+ and RHEL 10. The deb (`libc6 (>= 2.35)`)
 and the rpm (`glibc >= 2.35`) both declare that floor, so older systems refuse the install. Moving
