@@ -574,7 +574,7 @@ fn track(s: &mut Session, p: &Value) -> Result<Value> {
     let start_path = mask.path_at(mt0);
     let run = move || {
         use std::sync::atomic::Ordering;
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
         let gray = |t: Tick| -> Option<(filmcraft_render::track::Prepared, f64)> {
             let f = src.video_frame(filmcraft_media::FrameRequest { time: t, scale }).ok()?;
             let g = filmcraft_render::track::Gray::from_rgba8(f.width as usize, f.height as usize, &f.to_rgba8());
