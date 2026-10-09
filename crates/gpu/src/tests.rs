@@ -9,6 +9,83 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
 }
 
+#[test]
+fn yuv_code_range_uniforms() {
+    let mut mismatches = Vec::new();
+    for bits in [8, 10, 12, 16] {
+        let levels = (1u32 << bits) as f32;
+        for range in [Range::Full, Range::Limited] {
+            let src = SrcInfo {
+                kind: 2,
+                code_scale: if bits == 8 { 255.0 } else { levels },
+                code_levels: levels,
+                alpha: 0.0,
+                chroma: (1, 1),
+                size: (1, 1),
+                color: filmcraft_color::ColorInfo { range, ..filmcraft_color::ColorInfo::REC709 },
+            };
+            let u = GpuCompositor::uniforms(&src, &Affine::IDENTITY, 1.0, Blend::Normal, (1, 1));
+            // Full: 0..2^bits-1, neutral 2^(bits-1). Limited: BT.709 8-bit codes * 2^(bits-8).
+            let expected = match range {
+                Range::Full => [0.0, levels - 1.0, levels / 2.0, levels - 1.0],
+                Range::Limited => [16.0, 219.0, 128.0, 224.0].map(|v| v * (1u32 << (bits - 8)) as f32),
+            };
+            if u[16..20] != expected {
+                mismatches.push(format!("{bits}-bit {range:?}: {:?} != {expected:?}", &u[16..20]));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+#[test]
+fn yuv_code_range_gpu_matches_cpu() {
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut c = GpuCompositor::new(&dev, &q);
+    let mut prepared_compositor = GpuCompositor::new(&dev, &q);
+    for bits in [8, 10, 12, 16] {
+        let scale = 1u32 << (bits - 8);
+        for range in [Range::Full, Range::Limited] {
+            // Constant chroma isolates range normalization from CPU/GPU chroma reconstruction.
+            for (u, v) in [(128, 128), (64, 192), (192, 64)] {
+                let y = (0..=255).map(|code| (code * scale) as u16).collect::<Vec<_>>();
+                let planes = [Arc::new(y), Arc::new(vec![(u * scale) as u16; 256]), Arc::new(vec![(v * scale) as u16; 256])];
+                let data = if bits == 8 {
+                    PixelData::Yuv8 { planes: planes.map(|p| Arc::new(p.iter().map(|v| *v as u8).collect())), chroma: Chroma::C444, alpha: None }
+                } else {
+                    PixelData::Yuv16 { planes, chroma: Chroma::C444, bits, alpha: None }
+                };
+                let frame = Arc::new(VideoFrame {
+                    width: 256,
+                    height: 1,
+                    data,
+                    color: filmcraft_color::ColorInfo { range, ..filmcraft_color::ColorInfo::REC709 },
+                    par: (1, 1),
+                    pts: Default::default(),
+                });
+                let cpu = frame.to_rgba8();
+                let plan = FramePlan::Layers { width: 256, height: 1, layers: vec![PlanLayer::new(frame, Affine::IDENTITY, 1.0, Blend::Normal)] };
+                c.composite(&plan);
+                let (w, h, gpu) = c.read_output().expect("readback");
+                assert_eq!((w, h, gpu.len()), (256, 1, cpu.len()));
+                let error = cpu.iter().zip(&gpu).map(|(a, b)| a.abs_diff(*b)).max().expect("pixels");
+                // One output-code tolerance: CPU f32 vs GPU f16 accumulator quantization.
+                assert!(error <= 1, "{bits}-bit {range:?} U={u} V={v}: max error {error}");
+                if u == 128 && v == 128 {
+                    assert!(gpu.as_chunks::<4>().0.iter().all(|p| p[0] == p[1] && p[1] == p[2]), "neutral tint: {bits}-bit {range:?}");
+                }
+                let prepared = prepare(&plan);
+                prepared_compositor.composite_prepared(&plan, Some(&prepared));
+                assert_eq!(prepared_compositor.read_output().expect("prepared readback").2, gpu, "prepared: {bits}-bit {range:?}");
+                eprintln!("range gate: {bits}-bit {range:?} U={u} V={v}, max error={error}, prepared=inline");
+            }
+        }
+    }
+}
+
 fn yuv_frame(w: u32, h: u32) -> Arc<VideoFrame> {
     let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
     let y: Vec<u8> = (0..w * h).map(|i| (16 + ((i % w) * 219 / w)) as u8).collect();
