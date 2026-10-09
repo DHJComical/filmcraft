@@ -753,6 +753,8 @@ impl Default for AddTracksDraft {
 #[serde(default)]
 pub struct SequenceSettingsDraft {
     pub tab: String,
+    /// The sequence's name (its Project panel item); a blank name keeps the current one.
+    pub name: String,
     pub fps_num: i64,
     pub fps_den: i64,
     pub width: u32,
@@ -771,6 +773,7 @@ impl Default for SequenceSettingsDraft {
     fn default() -> Self {
         Self {
             tab: "general".into(),
+            name: String::new(),
             fps_num: 24_000,
             fps_den: 1001,
             width: 1920,

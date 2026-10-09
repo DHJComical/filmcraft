@@ -470,6 +470,7 @@ fn sequence_settings_dialog_shows_the_sequence() {
     assert_eq!(r["dialog"], "sequenceSettings", "{r}");
     d.frames(3);
     for (id, shown) in [
+        ("sequenceSettings.name", "Main Edit"),
         ("sequenceSettings.editingMode", "Custom"),
         ("sequenceSettings.timebase", "23.976 frames/second"),
         ("sequenceSettings.width", "1920"),
@@ -556,4 +557,37 @@ fn sequence_settings_dialog_applies_in_one_undo_step() {
     assert!((x1 - x0 * k).abs() < 1e-9 && (y1 - y0 * k).abs() < 1e-9 && (s1 - s0 * k).abs() < 1e-9, "{x0},{y0},{s0} -> {x1},{y1},{s1}");
     d.exec("edit.undo", json!({}));
     assert_eq!(*d.app().session.project, before, "one undo step for the whole dialog");
+}
+
+/// The General tab's Sequence Name renames the sequence (its Project panel item) together with
+/// the other settings, in the same undo step; a blank name keeps the old one.
+#[test]
+fn sequence_settings_dialog_renames_the_sequence() {
+    let mut d = Driver::demo();
+    let id = d.app().session.state.active_sequence.unwrap();
+    let name = |d: &mut Driver| d.app().session.project.item(id).unwrap().name.clone();
+    assert_eq!(name(&mut d), "Main Edit");
+    d.ok("ui.menu.invoke", json!({"id": "sequence.settings"}));
+    d.frames(10);
+    assert_eq!(d.label("sequenceSettings.name"), "Main Edit");
+    // the name field is a text edit; set the draft as typing would
+    d.app().ui.sequence_settings.name = "Rough Cut".into();
+    d.app().ui.sequence_settings.max_render_quality = true;
+    d.frames(2);
+    d.click("sequenceSettings.ok");
+    assert!(d.ids("sequenceSettings.").is_empty(), "dialog closed");
+    assert_eq!(name(&mut d), "Rough Cut");
+    assert!(d.app().session.active_sequence().unwrap().settings.max_render_quality);
+    d.exec("edit.undo", json!({}));
+    assert_eq!(name(&mut d), "Main Edit", "one undo step for the name and the settings");
+    assert!(!d.app().session.active_sequence().unwrap().settings.max_render_quality);
+    // a blank name changes nothing
+    let history = d.app().session.history.undo.len();
+    d.ok("ui.menu.invoke", json!({"id": "sequence.settings"}));
+    d.frames(10);
+    d.app().ui.sequence_settings.name = "   ".into();
+    d.frames(2);
+    d.click("sequenceSettings.ok");
+    assert_eq!(name(&mut d), "Main Edit");
+    assert_eq!(d.app().session.history.undo.len(), history);
 }
