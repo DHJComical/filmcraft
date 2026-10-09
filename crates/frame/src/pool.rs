@@ -226,21 +226,37 @@ mod tests {
                 pts: filmcraft_time::Tick::ZERO,
             })
         };
-        let before = stats().reused;
-        // a frame someone else still holds is left alone
+        let plane_ptrs = |frame: &VideoFrame| match &frame.data {
+            PixelData::Yuv8 { planes, .. } => planes.each_ref().map(|plane| plane.as_ptr() as usize),
+            _ => panic!("fixture has three byte planes"),
+        };
+        // A frame someone else still holds is left alone. The reuse statistic is global:
+        // concurrent float-buffer tests can change it without touching these planes.
         let shared = yuv(1);
         let held = shared.clone();
+        let held_ptrs = plane_ptrs(&held);
         recycle(shared);
-        assert!(take_u8(n).capacity() >= n);
-        assert_eq!(stats().reused, before);
+        let fresh = take_u8(n);
+        assert!(fresh.capacity() >= n);
+        assert!(!held_ptrs.contains(&(fresh.as_ptr() as usize)), "a shared plane cannot be handed out");
         assert_eq!(held.byte_size(), n + 2 * c);
-        // an unshared frame's planes come back, empty
-        recycle(yuv(2));
+        // An unshared frame's exact allocations come back, empty. Equal-size chroma
+        // planes may be taken in either order.
+        let unshared = yuv(2);
+        let returned_ptrs = plane_ptrs(&unshared);
+        recycle(unshared);
         let (y, u, v) = (take_u8(n), take_u8(c), take_u8(c));
-        assert!(y.is_empty() && y.capacity() >= n && u.capacity() >= c && v.capacity() >= c);
-        assert_eq!(stats().reused, before + 3);
-        // and are not handed out twice
-        take_u8(n);
-        assert_eq!(stats().reused, before + 3);
+        assert!(y.is_empty() && u.is_empty() && v.is_empty());
+        assert!(y.capacity() >= n && u.capacity() >= c && v.capacity() >= c);
+        assert_eq!(y.as_ptr() as usize, returned_ptrs[0]);
+        let mut expected_chroma = [returned_ptrs[1], returned_ptrs[2]];
+        let mut actual_chroma = [u.as_ptr() as usize, v.as_ptr() as usize];
+        expected_chroma.sort_unstable();
+        actual_chroma.sort_unstable();
+        assert_eq!(actual_chroma, expected_chroma);
+        // The returned allocations remain owned by y/u/v and cannot be handed out twice.
+        let another = take_u8(n);
+        assert!(another.capacity() >= n);
+        assert!(!returned_ptrs.contains(&(another.as_ptr() as usize)));
     }
 }

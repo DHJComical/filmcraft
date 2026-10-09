@@ -24,7 +24,7 @@
 //! Commands the frontend owns (tools, transport, panels, workspaces) are registered with
 //! [`Shortcuts::register_external`] so they can be listed, bound and resolved here too.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -593,22 +593,34 @@ impl Shortcuts {
             _ => return None,
         };
         self.apply_table(&mut b, &table);
+        // Canonical chords can become the same physical key on this platform. Keep the first
+        // binding, matching resolve(), when generating a built-in preset.
+        let platform = Platform::current();
+        let mut seen = BTreeSet::new();
+        b.retain(|binding| binding.chord().is_none_or(|chord| seen.insert((binding.context().to_string(), chord.effective(platform)))));
         Some(b)
     }
 
-    /// Apply a preset table: listed commands get exactly the listed keys, and a listed key is taken
-    /// away from whatever else had it in that context.
+    /// Apply a preset table: listed commands get the listed keys, and explicit physical keys take
+    /// precedence over inherited bindings in the same context. Within the table, keep canonical
+    /// replacement order so folded aliases retain their established first-match winner.
     fn apply_table(&self, b: &mut Vec<Binding>, table: &[Entry]) {
         let listed: Vec<&str> = table.iter().map(|e| e.0).filter(|c| self.known(c)).collect();
         b.retain(|x| !listed.contains(&x.command.as_str()));
+        let platform = Platform::current();
+        let mut explicit: Vec<Binding> = Vec::new();
         for (c, k, p) in table {
             if !self.known(c) {
                 continue;
             }
             let nb = Binding::new(c, k, panel_opt(p));
-            b.retain(|o| !(o.context() == nb.context() && o.chord() == nb.chord()));
-            b.push(nb);
+            let chord = nb.chord();
+            let physical = chord.as_ref().map(|chord| chord.effective(platform));
+            b.retain(|o| !(o.context() == nb.context() && o.chord().map(|chord| chord.effective(platform)) == physical));
+            explicit.retain(|o| !(o.context() == nb.context() && o.chord() == chord));
+            explicit.push(nb);
         }
+        b.extend(explicit);
     }
 
     fn presets_dir(&self) -> Option<PathBuf> {
