@@ -130,6 +130,8 @@ pub enum Dialog {
     DeleteTracks,
     /// Sequence ▸ Add Tracks….
     AddTracks,
+    /// Sequence ▸ Sequence Settings….
+    SequenceSettings,
 }
 
 #[derive(Default)]

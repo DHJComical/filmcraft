@@ -357,6 +357,13 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
             app.dialog = Some(crate::Dialog::DeleteTracks);
             return Ok(json!({"dialog": "deleteTracks"}));
         }
+        // Sequence Settings… from the menu opens the dialog; with params the engine command applies
+        // them directly.
+        "sequence.settings" if params.as_object().is_none_or(|m| m.is_empty()) => {
+            filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session))?;
+            crate::panels::sequence_settings::open(app);
+            return Ok(json!({"dialog": "sequenceSettings"}));
+        }
         "sequence.colorSettings" if params.as_object().is_none_or(|m| m.is_empty()) => {
             filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session))?;
             crate::panels::color_dialogs::open_sequence(app);

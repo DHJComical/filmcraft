@@ -144,6 +144,73 @@ fn sequence_parameters_are_bounded_and_failed_changes_are_atomic() {
     assert_eq!(s.active_sequence().unwrap().settings.height, 8192, "a 16384x8192 panorama is accepted");
 }
 
+/// The first video clip's Motion Position and Scale (static values).
+fn first_motion(s: &Session) -> (u64, (f64, f64), f64) {
+    let q = s.active_sequence().unwrap();
+    let it = q.video_tracks.iter().flat_map(|t| &t.items).find(|i| i.effect("motion").is_some()).unwrap();
+    let m = it.effect("motion").unwrap();
+    let p = match m.param("position").unwrap().value {
+        filmcraft_project::ParamValue::Vec2(v) => (v.x, v.y),
+        _ => panic!("position is a point"),
+    };
+    let sc = match m.param("scale").unwrap().value {
+        filmcraft_project::ParamValue::Float(v) => v,
+        _ => panic!("scale is a number"),
+    };
+    (it.id.0, p, sc)
+}
+
+#[test]
+fn sequence_settings_scales_motion_with_the_frame_size_in_one_undo_step() {
+    let mut s = demo();
+    let before = (*s.project).clone();
+    let (id, p0, s0) = first_motion(&s);
+    assert_eq!((s.active_sequence().unwrap().settings.width, s.active_sequence().unwrap().settings.height), (1920, 1080));
+    let r = s.execute("sequence.settings", json!({"width":1280,"height":720,"scaleMotion":true})).unwrap();
+    assert!(r["scaledClips"].as_u64().unwrap() >= 1, "{r}");
+    let (id1, p1, s1) = first_motion(&s);
+    assert_eq!(id1, id);
+    assert!((p1.0 - p0.0 * 2.0 / 3.0).abs() < 1e-9 && (p1.1 - p0.1 * 2.0 / 3.0).abs() < 1e-9, "{p0:?} -> {p1:?}");
+    assert!((s1 - s0 * 2.0 / 3.0).abs() < 1e-9, "{s0} -> {s1}");
+    let after = (*s.project).clone();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(*s.project, before, "size and Motion come back in one undo step");
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(*s.project, after);
+    // without the option the frame size changes alone (the command's default, as before)
+    let r = s.execute("sequence.settings", json!({"width":3840,"height":2160})).unwrap();
+    assert_eq!(r["scaledClips"], json!(0));
+    assert_eq!(first_motion(&s), (id, p1, s1));
+    assert_eq!(s.active_sequence().unwrap().settings.width, 3840);
+}
+
+#[test]
+fn sequence_settings_timecode_render_quality_and_colour() {
+    let mut s = demo();
+    s.execute("sequence.settings", json!({"fps":29.97,"dropFrame":true,"maxRenderQuality":true})).unwrap();
+    let st = s.active_sequence().unwrap().settings.clone();
+    assert_eq!(st.frame_rate, FrameRate::FPS_29_97);
+    assert!(st.drop_frame && st.max_render_quality);
+    s.execute("sequence.settings", json!({"dropFrame":false})).unwrap();
+    assert!(!s.active_sequence().unwrap().settings.drop_frame);
+    // drop-frame only exists for the NTSC rates; a refused change leaves everything as it was
+    let before = (*s.project).clone();
+    let history = s.history.undo.len();
+    for params in [json!({"fps":25,"dropFrame":true}), json!({"workingSpace":"rec2020-log"}), json!({"fps":25,"dropFrame":true,"width":1280})] {
+        assert!(s.execute("sequence.settings", params.clone()).is_err(), "{params}");
+        assert_eq!(*s.project, before, "{params}");
+        assert_eq!(s.history.undo.len(), history);
+    }
+    s.execute("sequence.settings", json!({"workingSpace":"rec2100-pq","wideGamut":true,"autoToneMap":true})).unwrap();
+    let st = s.active_sequence().unwrap().settings.clone();
+    assert_eq!(st.color.working, filmcraft_color::WorkingSpace::Rec2100Pq);
+    assert!(st.color.wide_gamut && st.color.auto_tone_map);
+    assert_eq!(st.working_space, "Rec. 2100 PQ");
+    // disabled without a sequence
+    let mut empty = Session::default();
+    assert!(empty.execute("sequence.settings", json!({"width":1280})).is_err());
+}
+
 #[test]
 fn zero_fps_is_refused() {
     let mut s = demo();
