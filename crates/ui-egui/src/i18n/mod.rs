@@ -62,6 +62,19 @@ impl Language {
         }
     }
 
+    /// Interface Language ▸ System Language (#218): the first of the user's preferred languages
+    /// (BCP 47 or POSIX locale tags such as `es-419`, `pt_BR.UTF-8`, most preferred first) that the
+    /// interface has, else English. Any Portuguese gets the Brazilian catalog, the only one there is.
+    pub fn from_locales(tags: &[String]) -> Self {
+        const PRIMARY: [(&str, Language); 4] = [("en", Language::En), ("ja", Language::Ja), ("es", Language::Es), ("pt", Language::PtBr)];
+        tags.iter()
+            .find_map(|tag| {
+                let primary = tag.split(['-', '_', '.', '@']).next().unwrap_or_default();
+                PRIMARY.iter().find(|(code, _)| primary.eq_ignore_ascii_case(code)).map(|(_, l)| *l)
+            })
+            .unwrap_or_default()
+    }
+
     /// Stable code: the `general.interfaceLanguage` preference value (`Language::parse` reads it back).
     pub fn code(self) -> &'static str {
         match self {
@@ -613,6 +626,59 @@ mod tests {
         assert!(crate::menus::menu_items(&app).iter().any(|it| it.id == "app.language.portuguese" && it.checked == Some(true)));
         crate::menus::invoke(&mut app, &ctx, "app.language.english", serde_json::json!({})).unwrap();
         assert_eq!(app.ui.language, Language::En);
+        set_current(Language::En);
+    }
+
+    /// #218: System Language picks the first of the user's preferred languages the interface has.
+    #[test]
+    fn system_language_follows_the_preferred_locales() {
+        let l = |tags: &[&str]| Language::from_locales(&tags.iter().map(|t| t.to_string()).collect::<Vec<_>>());
+        assert_eq!(l(&["es_ES.UTF-8"]), Language::Es);
+        assert_eq!(l(&["es-419"]), Language::Es);
+        assert_eq!(l(&["ES"]), Language::Es);
+        assert_eq!(l(&["ja-JP"]), Language::Ja);
+        assert_eq!(l(&["pt-BR"]), Language::PtBr);
+        assert_eq!(l(&["pt_PT.UTF-8@euro"]), Language::PtBr);
+        assert_eq!(l(&["fr-FR", "de", "es-MX", "ja"]), Language::Es, "the first one the interface has");
+        assert_eq!(l(&["en-GB", "es"]), Language::En);
+        for none in [&[][..], &["fr"], &["C"], &["POSIX"], &[""], &["e"], &["esp"], &["-es"]] {
+            assert_eq!(l(none), Language::En, "{none:?}");
+        }
+        assert_eq!(l(&[&"x".repeat(1 << 20), "es"]), Language::Es);
+    }
+
+    /// #218: the `system` preference (the default) asks the host for the system's languages; an
+    /// explicit choice does not, and without a host hook System Language is English.
+    #[test]
+    fn system_language_preference_uses_the_host_languages() {
+        let ctx = egui::Context::default();
+        let session = filmcraft_engine::Session::default();
+        assert_eq!(session.prefs.general.interface_language, "system");
+        let mut app = crate::FilmcraftApp::new(session);
+        app.apply_prefs(&ctx);
+        assert_eq!(app.ui.language, Language::En, "no host hook");
+
+        let mut app = crate::FilmcraftApp::new(filmcraft_engine::Session::default());
+        let asked = std::rc::Rc::new(std::cell::Cell::new(0));
+        let count = asked.clone();
+        app.hooks.system_languages = Some(Box::new(move || {
+            count.set(count.get() + 1);
+            vec!["fr-FR".into(), "es-ES".into()]
+        }));
+        app.apply_prefs(&ctx);
+        assert_eq!(app.ui.language, Language::Es);
+        assert_eq!(current(), Language::Es);
+        crate::menus::invoke(&mut app, &ctx, "app.language.english", serde_json::json!({})).unwrap();
+        app.apply_prefs(&ctx);
+        assert_eq!((app.ui.language, app.session.prefs.general.interface_language.as_str()), (Language::En, "en"));
+        let asked_before = asked.get();
+        app.session.execute("prefs.set", serde_json::json!({"key": "general.interfaceLanguage", "value": "ja"})).unwrap();
+        app.apply_prefs(&ctx);
+        assert_eq!(asked.get(), asked_before, "an explicit language does not ask the system");
+        app.session.execute("prefs.set", serde_json::json!({"key": "general.interfaceLanguage", "value": "system"})).unwrap();
+        app.apply_prefs(&ctx);
+        assert_eq!(app.ui.language, Language::Es);
+        assert_eq!(asked.get(), asked_before + 1);
         set_current(Language::En);
     }
 

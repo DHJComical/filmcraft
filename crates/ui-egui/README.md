@@ -7,6 +7,10 @@ Interactive controls keep stable automation ids regardless of the interface lang
 
 Edit > Language offers English, Japanese and Spanish. The language is stored in the engine's
 `general.interfaceLanguage` preference, restored on startup, and also available in Settings > General.
+Its default, System Language (`system`), follows the operating system: the first of the user's
+preferred languages that the interface has (the host supplies them through
+`HostHooks::system_languages`: `sys-locale` on the desktop, `navigator.languages` on the web),
+otherwise English.
 The `app.language.*` UI commands and `prefs.set` reach it through the control channel.
 Japanese requires a craft-fonts build or a suitable installed font.
 

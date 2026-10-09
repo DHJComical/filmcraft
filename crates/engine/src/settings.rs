@@ -33,7 +33,9 @@ pub const PREFS_VERSION: u32 = 2;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct GeneralPrefs {
-    /// Interface language (persisted independently of projects): `en`, `ja`, `es` or `pt-br`.
+    /// Interface language (persisted independently of projects): `en`, `ja`, `es`, `pt-br`, or
+    /// `system` (the default: the operating system's preferred language when the interface has it,
+    /// otherwise English).
     pub interface_language: String,
     /// "At Startup": `showHome` (FilmCraft: the demo project), `openMostRecent`, `emptyProject`.
     pub at_startup: String,
@@ -61,7 +63,7 @@ pub struct GeneralPrefs {
 impl Default for GeneralPrefs {
     fn default() -> Self {
         Self {
-            interface_language: "en".into(),
+            interface_language: "system".into(),
             at_startup: "showHome".into(),
             when_opening_project: "showOpenDialog".into(),
             bins_double_click: "openInPlace".into(),
@@ -678,7 +680,7 @@ static CATEGORIES: &[Category] = &[
             f(
                 "general.interfaceLanguage",
                 "Interface Language",
-                Kind::Choice(&[("en", "English"), ("ja", "日本語"), ("es", "Español"), ("pt-br", "Português (Brasil)")]),
+                Kind::Choice(&[("system", "System Language"), ("en", "English"), ("ja", "日本語"), ("es", "Español"), ("pt-br", "Português (Brasil)")]),
                 true,
             ),
             f("general.atStartup", "At Startup", Kind::Choice(STARTUP), true),

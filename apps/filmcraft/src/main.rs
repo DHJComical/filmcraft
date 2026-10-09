@@ -196,6 +196,8 @@ fn main() -> eframe::Result {
             }));
             app.hooks.pick_folder = Some(Box::new(|| rfd::FileDialog::new().pick_folder().map(|p| p.to_string_lossy().to_string())));
             app.hooks.open_path = Some(Box::new(open_path));
+            // Settings ▸ General ▸ Interface Language ▸ System Language (#218).
+            app.hooks.system_languages = Some(Box::new(|| sys_locale::get_locales().collect()));
             app.hooks.raise_without_focus = Some(Box::new(|| {
                 window_raise::raise_without_focus();
             }));

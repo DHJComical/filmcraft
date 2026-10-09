@@ -34,6 +34,21 @@ fn interface_language_persists_and_rejects_hostile_values() {
         assert_eq!(s.prefs.general.interface_language, "es");
     }
     assert_eq!(Preferences::load(&path).general.interface_language, "es");
+    // back to following the operating system (#218)
+    set(&mut s, "general.interfaceLanguage", json!("system"));
+    assert_eq!(Preferences::load(&path).general.interface_language, "system");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A new installation follows the operating system's language (#218); a saved choice is kept.
+#[test]
+fn interface_language_defaults_to_the_system_language() {
+    assert_eq!(Preferences::default().general.interface_language, "system");
+    let dir = tmp_dir("interface-language-default");
+    let path = dir.join("preferences.json");
+    assert_eq!(Preferences::load(&path).general.interface_language, "system", "no preferences file yet");
+    std::fs::write(&path, r#"{"general":{"interfaceLanguage":"en"}}"#).unwrap();
+    assert_eq!(Preferences::load(&path).general.interface_language, "en");
     std::fs::remove_dir_all(dir).unwrap();
 }
 

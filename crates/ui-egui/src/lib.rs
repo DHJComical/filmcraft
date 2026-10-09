@@ -108,6 +108,9 @@ pub struct HostHooks {
     pub pick_save_as: Option<Box<dyn FnMut(&str, &[&str], &str) -> Option<String>>>,
     /// The active keyboard shortcuts changed: update native menu key equivalents.
     pub shortcuts_changed: Option<Box<dyn FnMut(&[menus::MenuItem])>>,
+    /// The user's preferred languages (locale tags, most preferred first) for Interface Language ▸
+    /// System Language. Without it, System Language is English.
+    pub system_languages: Option<Box<dyn Fn() -> Vec<String>>>,
     /// Open dialog for a JSON file (shortcut preset import): filter name, extensions → path.
     pub pick_open_file: Option<Box<dyn FnMut(&str, &[&str]) -> Option<String>>>,
     /// Folder picker (Link Media search, proxy and Project Manager destinations).
@@ -501,7 +504,13 @@ impl FilmcraftApp {
             self.set_theme(ctx, ThemeKind::from_pref(&p.appearance.color_theme));
         }
         if prev.as_ref().is_none_or(|q| q.general.interface_language != p.general.interface_language) {
-            let language = i18n::Language::parse(&p.general.interface_language).unwrap_or_default();
+            let language = match i18n::Language::parse(&p.general.interface_language) {
+                Some(l) => l,
+                None if p.general.interface_language == "system" => {
+                    i18n::Language::from_locales(&self.hooks.system_languages.as_ref().map(|f| f()).unwrap_or_default())
+                }
+                None => i18n::Language::default(),
+            };
             if language == i18n::Language::Ja && !i18n::install_japanese_font(ctx) {
                 self.ui.language = i18n::Language::En;
                 self.ui.status = tl!("no Japanese font is installed on this system; the interface stays in English").into();
